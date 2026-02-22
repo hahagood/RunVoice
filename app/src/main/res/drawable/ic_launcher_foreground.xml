@@ -3,12 +3,31 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#00E676"
-        android:pathData="M54,30 L54,54 L70,62 L67,67 L48,57 L48,30 Z" />
+    <!-- Headphone band -->
     <path
         android:fillColor="#00000000"
-        android:pathData="M54,20 A34,34 0 1,1 53.99,20"
-        android:strokeWidth="4"
-        android:strokeColor="#00E676" />
+        android:strokeWidth="5"
+        android:strokeColor="#00E676"
+        android:strokeLineCap="round"
+        android:pathData="M32,54 C32,26 76,26 76,54" />
+    <!-- Left ear cup -->
+    <path
+        android:fillColor="#00E676"
+        android:pathData="M28,48 L32,48 A4,4 0 0,1 36,52 L36,64 A4,4 0 0,1 32,68 L28,68 A4,4 0 0,1 24,64 L24,52 A4,4 0 0,1 28,48 Z" />
+    <!-- Right ear cup -->
+    <path
+        android:fillColor="#00E676"
+        android:pathData="M76,48 L80,48 A4,4 0 0,1 84,52 L84,64 A4,4 0 0,1 80,68 L76,68 A4,4 0 0,1 72,64 L72,52 A4,4 0 0,1 76,48 Z" />
+    <!-- Runner head -->
+    <path
+        android:fillColor="#00E676"
+        android:pathData="M55,49 A3,3 0 1,1 54.99,49 Z" />
+    <!-- Runner side view: V-arms victory, back leg straight, front leg bent -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeWidth="3.5"
+        android:strokeColor="#00E676"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M54,52 L53,64 M53,64 L50,76 M53,64 L59,66 L56,72 M54,56 L48,48 M54,56 L60,48" />
 </vector>
