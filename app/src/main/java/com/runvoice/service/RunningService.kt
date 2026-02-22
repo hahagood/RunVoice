@@ -285,6 +285,8 @@ class RunningService : Service() {
         metronome.release()
         gpsTracker.stop()
         heartRateMonitor.disconnect()
+        // Clear metronome active flag so it won't auto-restart if system recreates the service
+        prefs.edit().putBoolean("metronome_active", false).apply()
         super.onDestroy()
     }
 }

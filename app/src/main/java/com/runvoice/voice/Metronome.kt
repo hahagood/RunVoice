@@ -3,13 +3,16 @@ package com.runvoice.voice
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
-import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.PI
-import kotlin.math.min
 import kotlin.math.sin
 
+/**
+ * Hardware-timed metronome: writes a continuous PCM stream (tick + silence)
+ * to AudioTrack in MODE_STREAM. Timing precision is driven by the audio DAC
+ * clock, not by CPU thread scheduling.
+ */
 class Metronome {
 
     companion object {
@@ -28,32 +31,38 @@ class Metronome {
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying = _isPlaying.asStateFlow()
 
-    private val pcmBuffer: ShortArray
+    // Pre-computed tick tone (50ms)
+    private val tickSamples: ShortArray
+    // Pre-computed silence buffer (reusable chunk)
+    private val silenceChunk = ShortArray(1024)
+
     private var audioTrack: AudioTrack? = null
-    private var playJob: Job? = null
+    private var playThread: Thread? = null
+    @Volatile private var stopRequested = false
 
     init {
         val numSamples = SAMPLE_RATE * TONE_DURATION_MS / 1000
-        pcmBuffer = ShortArray(numSamples)
+        tickSamples = ShortArray(numSamples)
         for (i in 0 until numSamples) {
             var sample = sin(2.0 * PI * TONE_FREQ_HZ * i / SAMPLE_RATE)
-            // Fade in
             if (i < FADE_SAMPLES) {
                 sample *= i.toDouble() / FADE_SAMPLES
             }
-            // Fade out
             val fromEnd = numSamples - 1 - i
             if (fromEnd < FADE_SAMPLES) {
                 sample *= fromEnd.toDouble() / FADE_SAMPLES
             }
-            pcmBuffer[i] = (sample * Short.MAX_VALUE * 0.3).toInt().toShort()
+            tickSamples[i] = (sample * Short.MAX_VALUE * 0.3).toInt().toShort()
         }
     }
 
-    private fun ensureAudioTrack(): AudioTrack {
-        audioTrack?.let { return it }
-        val bufSize = pcmBuffer.size * 2 // bytes
-        val track = AudioTrack.Builder()
+    private fun createAudioTrack(): AudioTrack {
+        val minBuf = AudioTrack.getMinBufferSize(
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        return AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -67,36 +76,55 @@ class Metronome {
                     .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                     .build()
             )
-            .setBufferSizeInBytes(bufSize)
-            .setTransferMode(AudioTrack.MODE_STATIC)
+            .setBufferSizeInBytes(minBuf)
+            .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
-        track.write(pcmBuffer, 0, pcmBuffer.size)
-        audioTrack = track
-        return track
     }
 
-    fun start(scope: CoroutineScope) {
+    fun start(@Suppress("UNUSED_PARAMETER") scope: kotlinx.coroutines.CoroutineScope) {
         if (_isPlaying.value) return
         _isPlaying.value = true
-        val track = ensureAudioTrack()
-        playJob = scope.launch(Dispatchers.Default) {
-            while (isActive) {
-                track.stop()
-                track.reloadStaticData()
-                track.play()
-                delay(60_000L / _bpm.value)
+        stopRequested = false
+
+        val track = createAudioTrack()
+        audioTrack = track
+        track.play()
+
+        playThread = Thread({
+            while (!stopRequested) {
+                val intervalSamples = SAMPLE_RATE * 60 / _bpm.value
+                val silenceSamples = intervalSamples - tickSamples.size
+
+                // Write tick
+                track.write(tickSamples, 0, tickSamples.size)
+
+                // Write silence in chunks
+                var remaining = silenceSamples
+                while (remaining > 0 && !stopRequested) {
+                    val n = minOf(remaining, silenceChunk.size)
+                    track.write(silenceChunk, 0, n)
+                    remaining -= n
+                }
             }
+        }, "Metronome").apply {
+            priority = Thread.MAX_PRIORITY
+            start()
         }
     }
 
     fun stop() {
-        playJob?.cancel()
-        playJob = null
-        audioTrack?.stop()
+        stopRequested = true
+        playThread?.join(500)
+        playThread = null
+        try {
+            audioTrack?.stop()
+        } catch (_: IllegalStateException) {}
+        audioTrack?.release()
+        audioTrack = null
         _isPlaying.value = false
     }
 
-    fun toggle(scope: CoroutineScope) {
+    fun toggle(scope: kotlinx.coroutines.CoroutineScope) {
         if (_isPlaying.value) stop() else start(scope)
     }
 
@@ -106,7 +134,5 @@ class Metronome {
 
     fun release() {
         stop()
-        audioTrack?.release()
-        audioTrack = null
     }
 }
