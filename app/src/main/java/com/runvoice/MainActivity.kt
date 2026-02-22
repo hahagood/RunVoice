@@ -116,7 +116,12 @@ class MainActivity : ComponentActivity() {
             val hrConnected by (hrMonitor?.connected ?: fallbackBool).collectAsStateWithLifecycle()
             val savedAddr = hrMonitor?.getSavedDeviceAddress()
 
-            NavHost(navController = navController, startDestination = "run") {
+            val startDest = remember {
+                val prefs = getSharedPreferences("runvoice", MODE_PRIVATE)
+                if (prefs.getBoolean("about_seen", false)) "run" else "about"
+            }
+
+            NavHost(navController = navController, startDestination = startDest) {
                 composable("run") {
                     RunScreen(
                         runData = runData,
@@ -130,8 +135,22 @@ class MainActivity : ComponentActivity() {
                             val intent = Intent(this@MainActivity, RunningService::class.java)
                             bindService(intent, connection, Context.BIND_AUTO_CREATE)
                         },
-                        onOpenHrSettings = { navController.navigate("hr_settings") }
+                        onOpenHrSettings = { navController.navigate("hr_settings") },
+                        onOpenAbout = { navController.navigate("about") },
+                        onToggleMetronome = { service?.toggleMetronome() },
+                        onBpmChange = { bpm -> service?.setMetronomeBpm(bpm) }
                     )
+                }
+                composable("about") {
+                    AboutScreen(onBack = {
+                        getSharedPreferences("runvoice", MODE_PRIVATE)
+                            .edit().putBoolean("about_seen", true).apply()
+                        if (!navController.popBackStack()) {
+                            navController.navigate("run") {
+                                popUpTo("about") { inclusive = true }
+                            }
+                        }
+                    })
                 }
                 composable("hr_settings") {
                     HrDeviceScreen(

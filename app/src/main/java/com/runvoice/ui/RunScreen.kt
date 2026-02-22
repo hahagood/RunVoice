@@ -1,6 +1,7 @@
 package com.runvoice.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -30,6 +31,9 @@ fun RunScreen(
     onResume: () -> Unit,
     onStop: () -> Unit,
     onOpenHrSettings: () -> Unit,
+    onOpenAbout: () -> Unit = {},
+    onToggleMetronome: () -> Unit = {},
+    onBpmChange: (Int) -> Unit = {},
     hrConnected: Boolean = false
 ) {
     Column(
@@ -39,26 +43,30 @@ fun RunScreen(
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Title
-        Text(
-            text = "RunVoice",
-            color = AccentGreen,
-            fontSize = 28.sp,
-            fontWeight = FontWeight.Bold
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // HR device status
-        TextButton(onClick = onOpenHrSettings) {
-            Text(
-                text = if (hrConnected) "心率带: 已连接" else "心率带: 未连接 (点击设置)",
-                color = if (hrConnected) AccentGreen else TextSecondary,
-                fontSize = 14.sp
-            )
+        // Title + HR status in one row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = onOpenAbout) {
+                Text(
+                    text = "RunVoice",
+                    color = AccentGreen,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            TextButton(onClick = onOpenHrSettings) {
+                Text(
+                    text = if (hrConnected) "心率带: 已连接" else "心率带: 未连接",
+                    color = if (hrConnected) AccentGreen else TextSecondary,
+                    fontSize = 13.sp
+                )
+            }
         }
 
-        Spacer(modifier = Modifier.weight(0.3f))
+        Spacer(modifier = Modifier.height(8.dp))
 
         // Data display
         DataCard(label = "时间", value = runData.timeFormatted, color = TextPrimary)
@@ -69,9 +77,19 @@ fun RunScreen(
         Spacer(modifier = Modifier.height(16.dp))
         DataCard(label = "距离", value = "${runData.distanceFormatted} km", color = AccentGreen)
 
-        Spacer(modifier = Modifier.weight(1f))
+        Spacer(modifier = Modifier.height(16.dp))
 
-        // Buttons: 开始 → 停止 → (继续/结束)
+        // Metronome control
+        MetronomeControl(
+            bpm = runData.metronomeBpm,
+            isPlaying = runData.metronomeActive,
+            onToggle = onToggleMetronome,
+            onBpmChange = onBpmChange
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Buttons:
         when {
             !runData.isRunning -> {
                 // Idle: single start button
@@ -87,21 +105,11 @@ fun RunScreen(
                 }
             }
             runData.isPaused -> {
-                // Paused: choose to resume or finish
+                // Paused: finish on left (less accessible), resume on right (easy to tap)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Button(
-                        onClick = onResume,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(72.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Text("▶  继续跑步", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = BgColor)
-                    }
                     Button(
                         onClick = onStop,
                         modifier = Modifier
@@ -111,6 +119,16 @@ fun RunScreen(
                         shape = RoundedCornerShape(16.dp)
                     ) {
                         Text("⏹  结束跑步", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                    }
+                    Button(
+                        onClick = onResume,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(72.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Text("▶  继续跑步", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = BgColor)
                     }
                 }
             }
@@ -154,5 +172,43 @@ private fun DataCard(label: String, value: String, color: Color) {
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
         )
+    }
+}
+
+@Composable
+private fun MetronomeControl(
+    bpm: Int,
+    isPlaying: Boolean,
+    onToggle: () -> Unit,
+    onBpmChange: (Int) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CardColor, RoundedCornerShape(12.dp))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "节拍器",
+            color = TextSecondary,
+            fontSize = 16.sp
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        IconButton(onClick = { onBpmChange(bpm - 5) }) {
+            Text("◀", color = TextSecondary, fontSize = 18.sp)
+        }
+        TextButton(onClick = onToggle) {
+            Text(
+                text = "$bpm",
+                color = if (isPlaying) AccentGreen else TextPrimary,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        IconButton(onClick = { onBpmChange(bpm + 5) }) {
+            Text("▶", color = TextSecondary, fontSize = 18.sp)
+        }
+        Spacer(modifier = Modifier.weight(1f))
     }
 }

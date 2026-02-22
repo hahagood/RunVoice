@@ -8,7 +8,9 @@ data class RunData(
     val isRunning: Boolean = false,
     val isPaused: Boolean = false,
     val hrDeviceConnected: Boolean = false,
-    val lastKmAnnounced: Int = 0
+    val lastKmAnnounced: Int = 0,
+    val metronomeActive: Boolean = false,
+    val metronomeBpm: Int = 180
 ) {
     val distanceKm: Float get() = distanceMeters / 1000f
 
