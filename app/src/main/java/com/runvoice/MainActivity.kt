@@ -155,6 +155,7 @@ class MainActivity : ComponentActivity() {
                 composable("hr_settings") {
                     HrDeviceScreen(
                         state = HrDeviceUiState(
+                            available = hrMonitor != null,
                             scanning = hrScanning,
                             devices = hrDevices.map { HrDeviceItem(it.name, it.address, it.rssi) },
                             connectedAddress = if (hrConnected) savedAddr else null,

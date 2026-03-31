@@ -1,16 +1,30 @@
 package com.runvoice.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.runvoice.model.RunData
@@ -22,6 +36,7 @@ private val AccentYellow = Color(0xFFFFD600)
 private val AccentRed = Color(0xFFFF5252)
 private val TextPrimary = Color(0xFFFFFFFF)
 private val TextSecondary = Color(0xFFB0BEC5)
+private val TextMuted = Color(0xFF7F8C99)
 
 @Composable
 fun RunScreen(
@@ -40,46 +55,47 @@ fun RunScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(BgColor)
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .safeDrawingPadding()
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Title + HR status in one row
+        HeaderRow(
+            hrConnected = hrConnected,
+            onOpenAbout = onOpenAbout,
+            onOpenHrSettings = onOpenHrSettings
+        )
+
+        HeroRunCard(
+            distance = "${runData.distanceFormatted} km",
+            heartRate = if (runData.heartRate > 0) "${runData.heartRate}" else "--",
+            maxHeartRate = if (runData.maxHeartRate > 0) "${runData.maxHeartRate}" else "--",
+            status = when {
+                runData.isPaused -> "已暂停"
+                runData.isRunning -> "跑步进行中"
+                else -> "准备开始"
+            }
+        )
+
         Row(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            TextButton(onClick = onOpenAbout) {
-                Text(
-                    text = "RunVoice",
-                    color = AccentGreen,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            Spacer(modifier = Modifier.weight(1f))
-            TextButton(onClick = onOpenHrSettings) {
-                Text(
-                    text = if (hrConnected) "心率带: 已连接" else "心率带: 未连接",
-                    color = if (hrConnected) AccentGreen else TextSecondary,
-                    fontSize = 13.sp
-                )
-            }
+            MetricCard(
+                modifier = Modifier.weight(1f),
+                label = "时间",
+                value = runData.timeFormatted,
+                unit = "",
+                valueColor = AccentYellow
+            )
+            MetricCard(
+                modifier = Modifier.weight(1f),
+                label = "配速",
+                value = runData.paceFormatted,
+                unit = "/km",
+                valueColor = if (runData.paceSecondsPerKm > 0) AccentYellow else TextMuted
+            )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Data display
-        DataCard(label = "时间", value = runData.timeFormatted, color = TextPrimary)
-        Spacer(modifier = Modifier.height(16.dp))
-        DataCard(label = "心率", value = if (runData.heartRate > 0) "${runData.heartRate} bpm" else "-- bpm", color = AccentRed)
-        Spacer(modifier = Modifier.height(16.dp))
-        DataCard(label = "配速", value = "${runData.paceFormatted}/km", color = AccentYellow)
-        Spacer(modifier = Modifier.height(16.dp))
-        DataCard(label = "距离", value = "${runData.distanceFormatted} km", color = AccentGreen)
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Metronome control
         MetronomeControl(
             bpm = runData.metronomeBpm,
             isPlaying = runData.metronomeActive,
@@ -87,12 +103,21 @@ fun RunScreen(
             onBpmChange = onBpmChange
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = if (hrConnected) {
+                "跑步时优先听耳机播报，手机只负责大号读数和快速操作。"
+            } else {
+                "当前未连接心率带，仍可记录时间、距离和配速。"
+            },
+            color = TextSecondary,
+            fontSize = 14.sp,
+            lineHeight = 20.sp
+        )
 
-        // Buttons:
+        Spacer(modifier = Modifier.weight(1f))
+
         when {
             !runData.isRunning -> {
-                // Idle: single start button
                 Button(
                     onClick = onStart,
                     modifier = Modifier
@@ -105,7 +130,6 @@ fun RunScreen(
                 }
             }
             runData.isPaused -> {
-                // Paused: finish on left (less accessible), resume on right (easy to tap)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
@@ -118,7 +142,14 @@ fun RunScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = AccentRed),
                         shape = RoundedCornerShape(16.dp)
                     ) {
-                        Text("⏹  结束跑步", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                        Text(
+                            "⏹  结束本次",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                     Button(
                         onClick = onResume,
@@ -128,12 +159,18 @@ fun RunScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
                         shape = RoundedCornerShape(16.dp)
                     ) {
-                        Text("▶  继续跑步", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = BgColor)
+                        Text(
+                            "▶  继续跑步",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = BgColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }
             else -> {
-                // Running: single stop button
                 Button(
                     onClick = onPause,
                     modifier = Modifier
@@ -142,36 +179,154 @@ fun RunScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = AccentRed),
                     shape = RoundedCornerShape(16.dp)
                 ) {
-                    Text("⏹  停止跑步", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                    Text("⏸  暂停跑步", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                 }
             }
         }
-
-        Spacer(modifier = Modifier.height(24.dp))
     }
 }
 
 @Composable
-private fun DataCard(label: String, value: String, color: Color) {
+private fun HeaderRow(
+    hrConnected: Boolean,
+    onOpenAbout: () -> Unit,
+    onOpenHrSettings: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        TextButton(onClick = onOpenAbout) {
+            Text(
+                text = "RunVoice",
+                color = AccentGreen,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Spacer(modifier = Modifier.weight(1f))
+        FilledTonalButton(
+            onClick = onOpenHrSettings,
+            colors = ButtonDefaults.filledTonalButtonColors(
+                containerColor = CardColor,
+                contentColor = AccentGreen
+            ),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+        ) {
+            Text(
+                text = if (hrConnected) "心率带已连接" else "心率带未连接",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+@Composable
+private fun HeroRunCard(
+    distance: String,
+    heartRate: String,
+    maxHeartRate: String,
+    status: String
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(CardColor, RoundedCornerShape(12.dp))
-            .padding(vertical = 12.dp, horizontal = 16.dp)
+            .background(CardColor, RoundedCornerShape(20.dp))
+            .padding(horizontal = 20.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = "距离", color = TextSecondary, fontSize = 16.sp)
+            Surface(
+                color = BgColor,
+                shape = RoundedCornerShape(999.dp)
+            ) {
+                Text(
+                    text = status,
+                    color = TextPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                )
+            }
+        }
+
         Text(
-            text = label,
-            color = TextSecondary,
-            fontSize = 16.sp
+            text = distance,
+            color = AccentYellow,
+            fontSize = 54.sp,
+            fontWeight = FontWeight.Bold
         )
-        Text(
-            text = value,
-            color = color,
-            fontSize = 42.sp,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(text = "当前心率", color = TextSecondary, fontSize = 14.sp)
+                Text(
+                    text = "$heartRate bpm",
+                    color = if (heartRate == "--") TextMuted else AccentYellow,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(text = "最大心率", color = TextSecondary, fontSize = 14.sp)
+                Text(
+                    text = "$maxHeartRate bpm",
+                    color = if (maxHeartRate == "--") TextMuted else AccentRed,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MetricCard(
+    modifier: Modifier = Modifier,
+    label: String,
+    value: String,
+    unit: String,
+    valueColor: Color
+) {
+    Column(
+        modifier = modifier
+            .background(CardColor, RoundedCornerShape(16.dp))
+            .padding(horizontal = 16.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(text = label, color = TextSecondary, fontSize = 15.sp)
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = value,
+                color = valueColor,
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Bold
+            )
+            if (unit.isNotEmpty()) {
+                Text(
+                    text = unit,
+                    color = TextSecondary,
+                    fontSize = 16.sp,
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+            }
+        }
     }
 }
 
@@ -182,33 +337,73 @@ private fun MetronomeControl(
     onToggle: () -> Unit,
     onBpmChange: (Int) -> Unit
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(CardColor, RoundedCornerShape(12.dp))
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .background(CardColor, RoundedCornerShape(16.dp))
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(
-            text = "节拍器",
-            color = TextSecondary,
-            fontSize = 16.sp
-        )
-        Spacer(modifier = Modifier.weight(1f))
-        IconButton(onClick = { onBpmChange(bpm - 5) }) {
-            Text("◀", color = TextSecondary, fontSize = 18.sp)
-        }
-        TextButton(onClick = onToggle) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = "节拍器", color = TextSecondary, fontSize = 16.sp)
             Text(
-                text = "$bpm",
-                color = if (isPlaying) AccentGreen else TextPrimary,
-                fontSize = 28.sp,
-                fontWeight = FontWeight.Bold
+                text = if (isPlaying) "已开启" else "未开启",
+                color = if (isPlaying) TextPrimary else TextMuted,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium
             )
         }
-        IconButton(onClick = { onBpmChange(bpm + 5) }) {
-            Text("▶", color = TextSecondary, fontSize = 18.sp)
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            FilledTonalButton(
+                onClick = { onBpmChange(bpm - 1) },
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = BgColor,
+                    contentColor = TextPrimary
+                ),
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 14.dp)
+            ) {
+                Text("▼", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Surface(
+                onClick = onToggle,
+                color = if (isPlaying) AccentRed else AccentGreen,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "$bpm BPM",
+                        color = if (isPlaying) TextPrimary else BgColor,
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            FilledTonalButton(
+                onClick = { onBpmChange(bpm + 1) },
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = BgColor,
+                    contentColor = TextPrimary
+                ),
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 14.dp)
+            ) {
+                Text("▲", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            }
         }
-        Spacer(modifier = Modifier.weight(1f))
     }
 }

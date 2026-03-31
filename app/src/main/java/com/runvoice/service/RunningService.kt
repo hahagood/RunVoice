@@ -4,9 +4,13 @@ import android.app.*
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
+import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import com.runvoice.MainActivity
 import com.runvoice.R
@@ -53,10 +57,14 @@ class RunningService : Service() {
     private var collectJob: Job? = null
     private var preRunHrJob: Job? = null
     private var lastKmAnnounced = 0
+    private var maxHeartRate = 0
+    private var mediaSession: MediaSession? = null
+    private var lastMediaButtonHandledAt = 0L
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        mediaSession = buildMediaSession()
         prefs = getSharedPreferences("runvoice", MODE_PRIVATE)
         motionDetector = MotionDetector(this)
         gpsTracker = GpsTracker(this, motionDetector)
@@ -98,13 +106,22 @@ class RunningService : Service() {
     private fun startRun() {
         preRunHrJob?.cancel()
         lastKmAnnounced = 0
-        _runData.value = RunData(isRunning = true, hrDeviceConnected = heartRateMonitor.connected.value)
+        maxHeartRate = heartRateMonitor.heartRate.value.coerceAtLeast(0)
+        _runData.value = RunData(
+            heartRate = heartRateMonitor.heartRate.value,
+            maxHeartRate = maxHeartRate,
+            isRunning = true,
+            hrDeviceConnected = heartRateMonitor.connected.value,
+            metronomeActive = metronome.isPlaying.value,
+            metronomeBpm = metronome.bpm.value
+        )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, buildNotification("跑步中 00:00"), ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else {
             startForeground(NOTIFICATION_ID, buildNotification("跑步中 00:00"))
         }
+        updateMediaSession(active = true, paused = false)
 
         runTimer.start(serviceScope)
         gpsTracker.start()
@@ -123,6 +140,7 @@ class RunningService : Service() {
         gpsTracker.pause()
         motionDetector.stop()
         _runData.update { it.copy(isPaused = true) }
+        updateMediaSession(active = true, paused = true)
         updateNotification("已暂停")
         voiceAnnouncer.speak("已暂停")
     }
@@ -132,6 +150,7 @@ class RunningService : Service() {
         gpsTracker.resume()
         motionDetector.start()
         _runData.update { it.copy(isPaused = false) }
+        updateMediaSession(active = true, paused = false)
         voiceAnnouncer.speak("继续跑步")
     }
 
@@ -148,6 +167,7 @@ class RunningService : Service() {
 
         // Keep last data visible, just mark as stopped
         _runData.update { it.copy(isRunning = false, isPaused = false) }
+        updateMediaSession(active = false, paused = false)
         startPreRunHrObservation()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -163,9 +183,12 @@ class RunningService : Service() {
                 heartRateMonitor.heartRate,
                 heartRateMonitor.connected
             ) { elapsed, distance, pace, hr, hrConn ->
+                val currentMaxHr = maxOf(maxHeartRate, hr)
+                maxHeartRate = currentMaxHr
                 RunData(
                     elapsedSeconds = elapsed,
                     heartRate = hr,
+                    maxHeartRate = currentMaxHr,
                     distanceMeters = distance,
                     paceSecondsPerKm = pace,
                     isRunning = true,
@@ -212,6 +235,7 @@ class RunningService : Service() {
                 _runData.update {
                     it.copy(
                         heartRate = state.hr,
+                        maxHeartRate = it.maxHeartRate,
                         hrDeviceConnected = state.hrConn,
                         metronomeActive = state.metroActive,
                         metronomeBpm = state.metroBpm
@@ -249,6 +273,89 @@ class RunningService : Service() {
         manager.createNotificationChannel(channel)
     }
 
+    private fun buildMediaSession(): MediaSession {
+        return MediaSession(this, "RunVoiceSession").apply {
+            setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
+            setCallback(object : MediaSession.Callback() {
+                override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                    val event = extractMediaKeyEvent(mediaButtonIntent) ?: return false
+                    if (event.action != KeyEvent.ACTION_UP || event.repeatCount != 0) return false
+                    if (!_runData.value.isRunning) return false
+
+                    when (event.keyCode) {
+                        KeyEvent.KEYCODE_HEADSETHOOK,
+                        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                        KeyEvent.KEYCODE_MEDIA_PLAY,
+                        KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                            val now = SystemClock.elapsedRealtime()
+                            if (now - lastMediaButtonHandledAt < 400L) return true
+                            lastMediaButtonHandledAt = now
+                            announceCurrentStats()
+                            return true
+                        }
+                    }
+                    return false
+                }
+            })
+            isActive = false
+        }
+    }
+
+    private fun updateMediaSession(active: Boolean, paused: Boolean) {
+        val session = mediaSession ?: return
+        session.isActive = active
+        val state = when {
+            !active -> PlaybackState.STATE_STOPPED
+            paused -> PlaybackState.STATE_PAUSED
+            else -> PlaybackState.STATE_PLAYING
+        }
+        session.setPlaybackState(
+            PlaybackState.Builder()
+                .setActions(
+                    PlaybackState.ACTION_PLAY_PAUSE or
+                        PlaybackState.ACTION_PLAY or
+                        PlaybackState.ACTION_PAUSE
+                )
+                .setState(state, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1f)
+                .build()
+        )
+    }
+
+    private fun announceCurrentStats() {
+        val data = _runData.value
+        if (!data.isRunning) return
+
+        val parts = buildList {
+            add("当前已跑${data.distanceFormatted}公里")
+            add("用时${formatTimeForSpeech(data.elapsedSeconds)}")
+            if (data.heartRate > 0) {
+                add("当前心率${data.heartRate}")
+            }
+            if (data.maxHeartRate > 0) {
+                add("最大心率${data.maxHeartRate}")
+            }
+            if (data.paceSecondsPerKm > 0) {
+                add("配速${formatPaceForSpeech(data.paceSecondsPerKm)}")
+            }
+            if (data.isPaused) {
+                add("当前已暂停")
+            }
+        }
+
+        voiceAnnouncer.speak(parts.joinToString("，"))
+    }
+
+    private fun formatPaceForSpeech(secondsPerKm: Int): String {
+        val min = secondsPerKm / 60
+        val sec = secondsPerKm % 60
+        return "${min}分${sec}秒每公里"
+    }
+
+    private fun extractMediaKeyEvent(intent: Intent): KeyEvent? {
+        @Suppress("DEPRECATION")
+        return intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT) as? KeyEvent
+    }
+
     private fun buildNotification(text: String): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this, 0,
@@ -280,6 +387,8 @@ class RunningService : Service() {
     }
 
     override fun onDestroy() {
+        mediaSession?.release()
+        mediaSession = null
         serviceScope.cancel()
         voiceAnnouncer.shutdown()
         metronome.release()

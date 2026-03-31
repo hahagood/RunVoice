@@ -17,6 +17,7 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
     }
 
     private val fusedClient = LocationServices.getFusedLocationProviderClient(context)
+    private val traceRecorder = GpsTraceRecorder(context)
 
     private val _distanceMeters = MutableStateFlow(0f)
     val distanceMeters = _distanceMeters.asStateFlow()
@@ -40,10 +41,22 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
-            val loc = result.lastLocation ?: return
-            // Filter out inaccurate points
-            if (loc.accuracy > 20f) return
-            processLocation(loc)
+            result.locations.forEach { loc ->
+                if (loc.accuracy > 20f) {
+                    traceRecorder.record(
+                        location = loc,
+                        motionState = motionDetector?.isMoving?.value,
+                        decision = "ignored",
+                        reason = "accuracy_gt_20m",
+                        deltaMeters = 0f,
+                        totalDistanceMeters = totalDistance,
+                        segmentDistanceMeters = segmentDistance,
+                        paceSecondsPerKm = _paceSecondsPerKm.value
+                    )
+                    return@forEach
+                }
+                processLocation(loc)
+            }
         }
     }
 
@@ -53,15 +66,49 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
 
         if (prev == null) {
             segmentStartTime = loc.time
+            traceRecorder.record(
+                location = loc,
+                motionState = motionDetector?.isMoving?.value,
+                decision = "accepted",
+                reason = "seed_point",
+                deltaMeters = 0f,
+                totalDistanceMeters = totalDistance,
+                segmentDistanceMeters = segmentDistance,
+                paceSecondsPerKm = _paceSecondsPerKm.value
+            )
             return
         }
 
         val d = prev.distanceTo(loc)
         // Ignore unreasonably large jumps (> 100m in ~2-3s = >120 km/h)
-        if (d > 100f) return
+        if (d > 100f) {
+            traceRecorder.record(
+                location = loc,
+                motionState = motionDetector?.isMoving?.value,
+                decision = "ignored",
+                reason = "jump_gt_100m",
+                deltaMeters = d,
+                totalDistanceMeters = totalDistance,
+                segmentDistanceMeters = segmentDistance,
+                paceSecondsPerKm = _paceSecondsPerKm.value
+            )
+            return
+        }
 
         // Skip distance accumulation when accelerometer says stationary (GPS drift)
-        if (motionDetector?.isMoving?.value == false) return
+        if (motionDetector?.isMoving?.value == false) {
+            traceRecorder.record(
+                location = loc,
+                motionState = false,
+                decision = "ignored",
+                reason = "motion_detector_stationary",
+                deltaMeters = d,
+                totalDistanceMeters = totalDistance,
+                segmentDistanceMeters = segmentDistance,
+                paceSecondsPerKm = _paceSecondsPerKm.value
+            )
+            return
+        }
 
         totalDistance += d
         segmentDistance += d
@@ -83,6 +130,17 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
             segmentDistance = 0f
             segmentStartTime = loc.time
         }
+
+        traceRecorder.record(
+            location = loc,
+            motionState = motionDetector?.isMoving?.value,
+            decision = "accepted",
+            reason = "distance_accumulated",
+            deltaMeters = d,
+            totalDistanceMeters = totalDistance,
+            segmentDistanceMeters = segmentDistance,
+            paceSecondsPerKm = _paceSecondsPerKm.value
+        )
     }
 
     private fun medianPace(): Int {
@@ -100,6 +158,7 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
         paceBuffer.clear()
         _distanceMeters.value = 0f
         _paceSecondsPerKm.value = 0
+        traceRecorder.startSession()
         fusedClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
     }
 
@@ -118,5 +177,8 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
     fun stop() {
         fusedClient.removeLocationUpdates(locationCallback)
         lastLocation = null
+        traceRecorder.closeSession()
     }
+
+    fun currentTracePath(): String? = traceRecorder.currentPath()
 }

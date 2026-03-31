@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
@@ -16,6 +17,7 @@ class HeartRateMonitor(private val context: Context) {
         private val CCC_DESCRIPTOR_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
         private const val PREFS_NAME = "runvoice_prefs"
         private const val KEY_HR_DEVICE_ADDRESS = "hr_device_address"
+        private const val TAG = "HeartRateMonitor"
     }
 
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -67,11 +69,16 @@ class HeartRateMonitor(private val context: Context) {
         @SuppressLint("MissingPermission")
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device ?: return
-            val name = device.name ?: return  // Skip unnamed devices
+            val name = device.name ?: "未知设备"
             val addr = device.address
             val d = BleDevice(name, addr, result.rssi)
             deviceSet[addr] = d
             _discoveredDevices.value = deviceSet.values.sortedByDescending { it.rssi }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            _scanning.value = false
+            Log.w(TAG, "BLE scan failed: $errorCode")
         }
     }
 
@@ -97,7 +104,7 @@ class HeartRateMonitor(private val context: Context) {
     fun connectToDevice(address: String) {
         val device = bluetoothAdapter?.getRemoteDevice(address) ?: return
         gatt?.close()
-        gatt = device.connectGatt(context, true, gattCallback)
+        gatt = device.connectGatt(context, false, gattCallback)
     }
 
     @SuppressLint("MissingPermission")

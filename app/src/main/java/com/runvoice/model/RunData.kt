@@ -3,6 +3,7 @@ package com.runvoice.model
 data class RunData(
     val elapsedSeconds: Long = 0L,
     val heartRate: Int = 0,
+    val maxHeartRate: Int = 0,
     val distanceMeters: Float = 0f,
     val paceSecondsPerKm: Int = 0,
     val isRunning: Boolean = false,
