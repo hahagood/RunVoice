@@ -35,9 +35,7 @@ class VoiceAnnouncer(context: Context) {
      * @param paceSecondsPerKm current pace in seconds per km
      */
     fun announceKilometer(km: Int, elapsedSeconds: Long, heartRate: Int, paceSecondsPerKm: Int) {
-        val timeMin = elapsedSeconds / 60
-        val timeSec = elapsedSeconds % 60
-        val timeText = if (timeMin > 0) "${timeMin}分${timeSec}秒" else "${timeSec}秒"
+        val timeText = formatElapsedTimeForSpeech(elapsedSeconds)
 
         val paceMin = paceSecondsPerKm / 60
         val paceSec = paceSecondsPerKm % 60
@@ -122,6 +120,17 @@ class VoiceAnnouncer(context: Context) {
         while (pendingUtterances.isNotEmpty()) {
             val (text, id) = pendingUtterances.removeFirst()
             enqueueOrSpeak(text, id)
+        }
+    }
+
+    private fun formatElapsedTimeForSpeech(seconds: Long): String {
+        val hours = seconds / 3600
+        val minutes = (seconds % 3600) / 60
+        val secs = seconds % 60
+        return buildString {
+            if (hours > 0) append("${hours}小时")
+            if (minutes > 0) append("${minutes}分")
+            append("${secs}秒")
         }
     }
 }
