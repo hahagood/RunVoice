@@ -129,8 +129,14 @@ class MainActivity : ComponentActivity() {
                         onPause = { sendServiceAction(RunningService.ACTION_PAUSE) },
                         onResume = { sendServiceAction(RunningService.ACTION_RESUME) },
                         hrConnected = hrConnected,
-                        onStop = {
-                            service?.stopRun()
+                        onSaveAndStop = {
+                            service?.stopRun(saveSession = true)
+                            // Re-bind since service stopped itself
+                            val intent = Intent(this@MainActivity, RunningService::class.java)
+                            bindService(intent, connection, Context.BIND_AUTO_CREATE)
+                        },
+                        onDiscardAndStop = {
+                            service?.stopRun(saveSession = false)
                             // Re-bind since service stopped itself
                             val intent = Intent(this@MainActivity, RunningService::class.java)
                             bindService(intent, connection, Context.BIND_AUTO_CREATE)

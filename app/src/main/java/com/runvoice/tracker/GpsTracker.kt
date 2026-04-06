@@ -174,10 +174,10 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
         fusedClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
     }
 
-    fun stop() {
+    fun stop(saveSession: Boolean = true) {
         fusedClient.removeLocationUpdates(locationCallback)
         lastLocation = null
-        traceRecorder.closeSession()
+        traceRecorder.closeSession(save = saveSession)
     }
 
     fun currentTracePath(): String? = traceRecorder.currentPath()

@@ -76,6 +76,11 @@ class GpsTraceRecorder(private val context: Context) {
     }
 
     fun closeSession() {
+        closeSession(save = true)
+    }
+
+    fun closeSession(save: Boolean) {
+        val file = currentFile
         try {
             writer?.flush()
             writer?.close()
@@ -83,7 +88,15 @@ class GpsTraceRecorder(private val context: Context) {
             Log.w(TAG, "Failed to close GPS trace session", t)
         } finally {
             writer = null
-            currentFile?.let { Log.i(TAG, "GPS trace saved: ${it.absolutePath}") }
+            if (save) {
+                file?.let { Log.i(TAG, "GPS trace saved: ${it.absolutePath}") }
+            } else if (file != null && file.exists()) {
+                if (file.delete()) {
+                    Log.i(TAG, "GPS trace discarded: ${file.absolutePath}")
+                } else {
+                    Log.w(TAG, "Failed to discard GPS trace: ${file.absolutePath}")
+                }
+            }
             currentFile = null
         }
     }

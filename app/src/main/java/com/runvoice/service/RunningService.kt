@@ -1,15 +1,18 @@
 package com.runvoice.service
 
 import android.app.*
+import android.content.ComponentName
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
+import android.util.Log
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import com.runvoice.MainActivity
@@ -27,6 +30,7 @@ import kotlinx.coroutines.flow.*
 class RunningService : Service() {
 
     companion object {
+        private const val TAG = "RunVoiceService"
         const val CHANNEL_ID = "running_channel"
         const val NOTIFICATION_ID = 1
         const val ACTION_START = "com.runvoice.START"
@@ -34,6 +38,7 @@ class RunningService : Service() {
         const val ACTION_RESUME = "com.runvoice.RESUME"
         const val ACTION_STOP = "com.runvoice.STOP"
         const val ACTION_TEST_ANNOUNCE = "com.runvoice.TEST_ANNOUNCE"
+        const val ACTION_HANDLE_MEDIA_BUTTON = "com.runvoice.HANDLE_MEDIA_BUTTON"
     }
 
     inner class RunBinder : Binder() {
@@ -90,6 +95,8 @@ class RunningService : Service() {
             ACTION_PAUSE -> pauseRun()
             ACTION_RESUME -> resumeRun()
             ACTION_STOP -> stopRun()
+            ACTION_HANDLE_MEDIA_BUTTON,
+            Intent.ACTION_MEDIA_BUTTON -> dispatchMediaButtonIntent(intent)
             ACTION_TEST_ANNOUNCE -> {
                 val data = _runData.value
                 voiceAnnouncer.announceKilometer(
@@ -154,14 +161,18 @@ class RunningService : Service() {
         voiceAnnouncer.speak("继续跑步")
     }
 
-    fun stopRun() {
+    fun stopRun(saveSession: Boolean = true) {
         val data = _runData.value
-        val km = data.distanceKm
-        voiceAnnouncer.speak("跑步结束，总距离${String.format("%.1f", km)}公里，用时${formatTimeForSpeech(data.elapsedSeconds)}")
+        if (saveSession) {
+            val km = data.distanceKm
+            voiceAnnouncer.speak("跑步结束，总距离${String.format("%.1f", km)}公里，用时${formatTimeForSpeech(data.elapsedSeconds)}")
+        } else {
+            voiceAnnouncer.speak("已放弃本次跑步记录")
+        }
 
         collectJob?.cancel()
         runTimer.reset()
-        gpsTracker.stop()
+        gpsTracker.stop(saveSession = saveSession)
         motionDetector.stop()
         // Keep HR monitor connected — don't disconnect
 
@@ -274,27 +285,29 @@ class RunningService : Service() {
     }
 
     private fun buildMediaSession(): MediaSession {
+        val mediaButtonReceiver = PendingIntent.getBroadcast(
+            this,
+            0,
+            Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+                component = ComponentName(this@RunningService, MediaButtonIntentReceiver::class.java)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         return MediaSession(this, "RunVoiceSession").apply {
             setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
+            setPlaybackToLocal(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            setMediaButtonReceiver(mediaButtonReceiver)
+            setMediaButtonBroadcastReceiver(ComponentName(this@RunningService, MediaButtonIntentReceiver::class.java))
             setCallback(object : MediaSession.Callback() {
                 override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
                     val event = extractMediaKeyEvent(mediaButtonIntent) ?: return false
-                    if (event.action != KeyEvent.ACTION_UP || event.repeatCount != 0) return false
-                    if (!_runData.value.isRunning) return false
-
-                    when (event.keyCode) {
-                        KeyEvent.KEYCODE_HEADSETHOOK,
-                        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-                        KeyEvent.KEYCODE_MEDIA_PLAY,
-                        KeyEvent.KEYCODE_MEDIA_PAUSE -> {
-                            val now = SystemClock.elapsedRealtime()
-                            if (now - lastMediaButtonHandledAt < 400L) return true
-                            lastMediaButtonHandledAt = now
-                            announceCurrentStats()
-                            return true
-                        }
-                    }
-                    return false
+                    return handleMediaButtonEvent(event)
                 }
             })
             isActive = false
@@ -354,6 +367,38 @@ class RunningService : Service() {
     private fun extractMediaKeyEvent(intent: Intent): KeyEvent? {
         @Suppress("DEPRECATION")
         return intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT) as? KeyEvent
+    }
+
+    private fun dispatchMediaButtonIntent(intent: Intent) {
+        val event = extractMediaKeyEvent(intent)
+        if (event == null) {
+            Log.w(TAG, "Ignoring media button intent without KeyEvent")
+            return
+        }
+
+        val handled = mediaSession?.controller?.dispatchMediaButtonEvent(event) == true
+        if (!handled) {
+            Log.w(TAG, "Media button was not handled by session controller")
+        }
+    }
+
+    private fun handleMediaButtonEvent(event: KeyEvent): Boolean {
+        if (event.action != KeyEvent.ACTION_UP || event.repeatCount != 0) return false
+        if (!_runData.value.isRunning) return false
+
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_HEADSETHOOK,
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+            KeyEvent.KEYCODE_MEDIA_PLAY,
+            KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastMediaButtonHandledAt < 400L) return true
+                lastMediaButtonHandledAt = now
+                announceCurrentStats()
+                return true
+            }
+        }
+        return false
     }
 
     private fun buildNotification(text: String): Notification {

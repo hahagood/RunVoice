@@ -16,10 +16,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -44,13 +49,35 @@ fun RunScreen(
     onStart: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
-    onStop: () -> Unit,
+    onSaveAndStop: () -> Unit,
+    onDiscardAndStop: () -> Unit,
     onOpenHrSettings: () -> Unit,
     onOpenAbout: () -> Unit = {},
     onToggleMetronome: () -> Unit = {},
     onBpmChange: (Int) -> Unit = {},
     hrConnected: Boolean = false
 ) {
+    var showStopConfirm by remember { mutableStateOf(false) }
+
+    if (showStopConfirm) {
+        StopRunConfirmScreen(
+            runData = runData,
+            onSaveAndStop = {
+                showStopConfirm = false
+                onSaveAndStop()
+            },
+            onDiscardAndStop = {
+                showStopConfirm = false
+                onDiscardAndStop()
+            },
+            onResume = {
+                showStopConfirm = false
+                onResume()
+            }
+        )
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -135,7 +162,7 @@ fun RunScreen(
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     Button(
-                        onClick = onStop,
+                        onClick = { showStopConfirm = true },
                         modifier = Modifier
                             .weight(1f)
                             .height(72.dp),
@@ -183,6 +210,140 @@ fun RunScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun StopRunConfirmScreen(
+    runData: RunData,
+    onSaveAndStop: () -> Unit,
+    onDiscardAndStop: () -> Unit,
+    onResume: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BgColor)
+            .safeDrawingPadding()
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text(
+            text = "结束本次跑步",
+            color = TextPrimary,
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        StopRunSummaryCard(runData = runData)
+
+        StopRunHintCard(
+            title = "请选择如何处理本次记录",
+            body = "保存后会保留本次跑步数据。放弃后，本次 GPS 轨迹文件也会一起删除。"
+        )
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        Button(
+            onClick = onSaveAndStop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Text("保存数据", fontSize = 20.sp, color = BgColor, fontWeight = FontWeight.Bold)
+        }
+
+        OutlinedButton(
+            onClick = onDiscardAndStop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentRed),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Text("放弃本次", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
+
+        TextButton(
+            onClick = onResume,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("继续跑步", color = TextSecondary, fontSize = 16.sp)
+        }
+    }
+}
+
+@Composable
+private fun StopRunSummaryCard(runData: RunData) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CardColor, RoundedCornerShape(16.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("当前记录", color = TextSecondary, fontSize = 14.sp)
+            Surface(
+                color = BgColor,
+                shape = RoundedCornerShape(999.dp)
+            ) {
+                Text(
+                    text = "已暂停",
+                    color = TextPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                )
+            }
+        }
+
+        Text(
+            text = "${runData.distanceFormatted} km",
+            color = AccentYellow,
+            fontSize = 32.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            MetricCard(
+                modifier = Modifier.weight(1f),
+                label = "时间",
+                value = runData.timeFormatted,
+                unit = "",
+                valueColor = AccentYellow
+            )
+            MetricCard(
+                modifier = Modifier.weight(1f),
+                label = "配速",
+                value = runData.paceFormatted,
+                unit = "/km",
+                valueColor = if (runData.paceSecondsPerKm > 0) AccentYellow else TextMuted
+            )
+        }
+    }
+}
+
+@Composable
+private fun StopRunHintCard(title: String, body: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CardColor, RoundedCornerShape(16.dp))
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(title, color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Text(body, color = TextSecondary, fontSize = 15.sp, lineHeight = 22.sp)
     }
 }
 
