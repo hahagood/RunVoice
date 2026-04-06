@@ -80,7 +80,7 @@ fun HrDeviceScreen(
                 Text("← 返回", color = AccentGreen, fontSize = 18.sp)
             }
             Spacer(modifier = Modifier.weight(1f))
-            Text("心率带设置", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("心率监控设置", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         }
 
         DeviceStatusCard(
@@ -124,7 +124,7 @@ fun HrDeviceScreen(
         when {
             state.devices.isNotEmpty() -> {
                 Text(
-                    text = "点击设备即可连接。优先选择你平时固定使用的心率带。",
+                    text = "点击设备即可连接。优先选择你平时固定使用的心率监控设备。",
                     color = TextSecondary,
                     fontSize = 14.sp
                 )
@@ -143,7 +143,7 @@ fun HrDeviceScreen(
             state.scanning -> {
                 EmptyStateCard(
                     title = "正在搜索附近设备",
-                    body = "请先佩戴并唤醒心率带，保持它在手机附近。搜索结束后会自动显示结果。"
+                    body = "请先佩戴并唤醒心率监控设备，保持它在手机附近。搜索结束后会自动显示结果。"
                 )
             }
             !state.available -> {
@@ -155,7 +155,7 @@ fun HrDeviceScreen(
             else -> {
                 EmptyStateCard(
                     title = "还没有开始搜索",
-                    body = "建议先把常用心率带连好，之后就可以主要通过耳机语音掌握心率变化。"
+                    body = "建议先把常用心率监控设备连好，之后就可以主要通过耳机语音掌握心率变化。"
                 )
             }
         }
@@ -205,7 +205,7 @@ private fun DeviceStatusCard(
 
         if (savedAddress == null) {
             Text(
-                text = "还没有保存过心率带。连接成功后，下次会自动尝试重连。",
+                text = "还没有保存过心率监控设备。连接成功后，下次会自动尝试重连。",
                 color = TextSecondary,
                 fontSize = 15.sp,
                 lineHeight = 21.sp

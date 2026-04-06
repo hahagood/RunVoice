@@ -236,7 +236,7 @@ private fun PermissionScreen(onRequestPermissions: () -> Unit) {
             fontSize = 18.sp
         )
         Spacer(modifier = Modifier.height(12.dp))
-        val items = listOf("精确定位 — GPS 追踪", "蓝牙 — 连接心率带", "通知 — 前台服务运行")
+        val items = listOf("精确定位 — GPS 追踪", "蓝牙 — 连接心率监控设备", "通知 — 前台服务运行")
         items.forEach {
             Text("• $it", color = Color(0xFFB0BEC5), fontSize = 16.sp)
         }

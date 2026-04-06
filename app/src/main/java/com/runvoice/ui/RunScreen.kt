@@ -134,7 +134,7 @@ fun RunScreen(
             text = if (hrConnected) {
                 "跑步时优先听耳机播报，手机只负责大号读数和快速操作。"
             } else {
-                "当前未连接心率带，仍可记录时间、距离和配速。"
+                "当前未连接心率监控设备，仍可记录时间、距离和配速。"
             },
             color = TextSecondary,
             fontSize = 14.sp,
@@ -375,7 +375,7 @@ private fun HeaderRow(
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
         ) {
             Text(
-                text = if (hrConnected) "心率带已连接" else "心率带未连接",
+                text = if (hrConnected) "心率监控已连接" else "心率监控未连接",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium
             )

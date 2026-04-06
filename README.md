@@ -8,7 +8,7 @@
 - **配速平滑** — 速度异常过滤（0.5–7 m/s）+ 5 段中位数滤波，消除 GPS 跳点导致的配速飙高
 - **静止漂移过滤** — 加速度传感器检测运动状态，静止时冻结距离累加，防止 GPS 漂移偷距离
 - **GPS 轨迹留档** — 每次跑步自动保存原始定位点 CSV，记录定位点是否被接受、过滤原因、累计距离、分段距离和配速，便于和其他 APP 轨迹对比
-- **BLE 心率** — 标准蓝牙心率带（0x180D 协议），扫描/配对/自动重连，连接即显示心率（无需开跑）
+- **BLE 心率** — 标准蓝牙心率监控设备（0x180D 协议），扫描/配对/自动重连，连接即显示心率（无需开跑）
 - **语音播报** — 每跑完 1 公里中文语音播报：距离、用时、心率、配速
 - **耳机单击即时播报** — 跑步中支持通过蓝牙耳机的单击媒体键触发一次当前数据播报（已在真机验证）
 - **步频节拍器** — 160–220 BPM 可调，350Hz 正弦波脉冲，AudioTrack 硬件时钟驱动（无累积误差），状态自动记忆
@@ -51,7 +51,7 @@ app/src/main/java/com/runvoice/
 ├── MainActivity.kt              # 入口 + 导航 + 权限处理
 ├── ui/
 │   ├── RunScreen.kt             # 跑步主界面
-│   ├── HrDeviceScreen.kt       # 心率带扫描/连接
+│   ├── HrDeviceScreen.kt       # 心率监控设备扫描/连接
 │   └── AboutScreen.kt          # 关于/免责声明
 ├── service/
 │   └── RunningService.kt       # 前台服务，整合所有模块
@@ -74,7 +74,7 @@ app/src/main/java/com/runvoice/
 |------|------|
 | `ACCESS_FINE_LOCATION` | GPS 定位 |
 | `FOREGROUND_SERVICE` | 息屏后持续运行 |
-| `BLUETOOTH` / `BLUETOOTH_SCAN` / `BLUETOOTH_CONNECT` | 连接心率带 |
+| `BLUETOOTH` / `BLUETOOTH_SCAN` / `BLUETOOTH_CONNECT` | 连接心率监控设备 |
 | `POST_NOTIFICATIONS` | 前台服务通知 |
 
 ## 构建
@@ -104,7 +104,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ## 使用
 
 1. 打开 APP，授予定位权限（蓝牙权限可选）
-2. （可选）点击"心率带: 未连接"进入配对页面，扫描并选择心率带
+2. （可选）点击"心率监控: 未连接"进入配对页面，扫描并选择心率设备
 3. （可选）点击节拍器 BPM 按钮开启步频节拍，▲ / ▼ 调整 BPM（开关状态自动记忆）
 4. 点击"开始跑步"，放入口袋，戴上蓝牙耳机
 5. 每跑完 1 公里自动语音播报
@@ -139,7 +139,7 @@ adb pull /sdcard/Android/data/com.runvoice/files/gps-traces ./gps-traces
 
 - Android 8.0+（API 26）
 - Google Play Services（GPS）
-- 蓝牙 4.0+（心率带功能）
+- 蓝牙 4.0+（心率监控功能）
 
 ## Roadmap
 
