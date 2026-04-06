@@ -1,5 +1,6 @@
 package com.runvoice.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -24,7 +25,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -33,6 +36,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.runvoice.model.RunData
+import com.runvoice.share.RunSummaryImageSaver
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private val BgColor = Color(0xFF1A1A2E)
 private val CardColor = Color(0xFF16213E)
@@ -57,11 +67,16 @@ fun RunScreen(
     onBpmChange: (Int) -> Unit = {},
     hrConnected: Boolean = false
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val imageSaver = remember(context) { RunSummaryImageSaver(context) }
     var showStopConfirm by remember { mutableStateOf(false) }
+    var stopConfirmAtMillis by remember { mutableStateOf(0L) }
 
     if (showStopConfirm) {
         StopRunConfirmScreen(
             runData = runData,
+            finishedAtMillis = stopConfirmAtMillis.takeIf { it > 0L } ?: System.currentTimeMillis(),
             onSaveAndStop = {
                 showStopConfirm = false
                 onSaveAndStop()
@@ -70,9 +85,13 @@ fun RunScreen(
                 showStopConfirm = false
                 onDiscardAndStop()
             },
-            onResume = {
-                showStopConfirm = false
-                onResume()
+            onSaveSnapshot = { finishedAtMillis ->
+                scope.launch {
+                    val message = withContext(Dispatchers.IO) {
+                        imageSaver.saveSummary(runData, finishedAtMillis)
+                    }
+                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                }
             }
         )
         return
@@ -162,7 +181,10 @@ fun RunScreen(
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     Button(
-                        onClick = { showStopConfirm = true },
+                        onClick = {
+                            stopConfirmAtMillis = System.currentTimeMillis()
+                            showStopConfirm = true
+                        },
                         modifier = Modifier
                             .weight(1f)
                             .height(72.dp),
@@ -216,9 +238,10 @@ fun RunScreen(
 @Composable
 private fun StopRunConfirmScreen(
     runData: RunData,
+    finishedAtMillis: Long,
     onSaveAndStop: () -> Unit,
     onDiscardAndStop: () -> Unit,
-    onResume: () -> Unit
+    onSaveSnapshot: (Long) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -229,7 +252,7 @@ private fun StopRunConfirmScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Text(
-            text = "结束本次跑步",
+            text = formatFinishedAt(finishedAtMillis),
             color = TextPrimary,
             fontSize = 24.sp,
             fontWeight = FontWeight.Bold
@@ -239,7 +262,7 @@ private fun StopRunConfirmScreen(
 
         StopRunHintCard(
             title = "请选择如何处理本次记录",
-            body = "保存后会保留本次跑步数据。放弃后，本次 GPS 轨迹文件也会一起删除。"
+            body = "保存后会保留本次跑步数据。放弃后，本次 GPS 轨迹文件也会一起删除。也可以先把当前摘要保存为本地截图。"
         )
 
         Spacer(modifier = Modifier.weight(1f))
@@ -266,11 +289,18 @@ private fun StopRunConfirmScreen(
             Text("放弃本次", fontSize = 18.sp, fontWeight = FontWeight.Bold)
         }
 
-        TextButton(
-            onClick = onResume,
-            modifier = Modifier.fillMaxWidth()
+        FilledTonalButton(
+            onClick = { onSaveSnapshot(finishedAtMillis) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            colors = ButtonDefaults.filledTonalButtonColors(
+                containerColor = CardColor,
+                contentColor = AccentYellow
+            ),
+            shape = RoundedCornerShape(14.dp)
         ) {
-            Text("继续跑步", color = TextSecondary, fontSize = 16.sp)
+            Text("保存截图", fontSize = 18.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -324,11 +354,34 @@ private fun StopRunSummaryCard(runData: RunData) {
             )
             MetricCard(
                 modifier = Modifier.weight(1f),
-                label = "配速",
-                value = runData.paceFormatted,
+                label = "平均配速",
+                value = averagePaceFormatted(runData),
                 unit = "/km",
-                valueColor = if (runData.paceSecondsPerKm > 0) AccentYellow else TextMuted
+                valueColor = if (runData.distanceMeters > 0f) AccentYellow else TextMuted
             )
+        }
+
+        if (runData.maxHeartRate > 0) {
+            Surface(
+                color = BgColor,
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("最大心率", color = TextSecondary, fontSize = 14.sp)
+                    Text(
+                        text = "${runData.maxHeartRate} bpm",
+                        color = AccentRed,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
         }
     }
 }
@@ -345,6 +398,18 @@ private fun StopRunHintCard(title: String, body: String) {
         Text(title, color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Text(body, color = TextSecondary, fontSize = 15.sp, lineHeight = 22.sp)
     }
+}
+
+private fun averagePaceFormatted(runData: RunData): String {
+    if (runData.distanceMeters <= 0f || runData.elapsedSeconds <= 0L) return "--'--\""
+    val secondsPerKm = ((runData.elapsedSeconds * 1000f) / runData.distanceMeters).toInt()
+    val minutes = secondsPerKm / 60
+    val seconds = secondsPerKm % 60
+    return "%d'%02d\"".format(minutes, seconds)
+}
+
+private fun formatFinishedAt(finishedAtMillis: Long): String {
+    return SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(finishedAtMillis))
 }
 
 @Composable
