@@ -314,74 +314,53 @@ private fun StopRunSummaryCard(runData: RunData) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        StopRunSummaryRow(
+            label = "距离",
+            value = "${runData.distanceFormatted} km",
+            valueColor = AccentYellow
+        )
+        StopRunSummaryRow(
+            label = "总用时",
+            value = runData.timeFormatted,
+            valueColor = AccentYellow
+        )
+        StopRunSummaryRow(
+            label = "平均配速",
+            value = "${averagePaceFormatted(runData)} /km",
+            valueColor = if (runData.distanceMeters > 0f) AccentYellow else TextMuted
+        )
+        StopRunSummaryRow(
+            label = "最大心率",
+            value = if (runData.maxHeartRate > 0) "${runData.maxHeartRate} bpm" else "-- bpm",
+            valueColor = if (runData.maxHeartRate > 0) AccentRed else TextMuted
+        )
+    }
+}
+
+@Composable
+private fun StopRunSummaryRow(
+    label: String,
+    value: String,
+    valueColor: Color
+) {
+    Surface(
+        color = BgColor,
+        shape = RoundedCornerShape(14.dp)
+    ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("当前记录", color = TextSecondary, fontSize = 14.sp)
-            Surface(
-                color = BgColor,
-                shape = RoundedCornerShape(999.dp)
-            ) {
-                Text(
-                    text = "已暂停",
-                    color = TextPrimary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                )
-            }
-        }
-
-        Text(
-            text = "${runData.distanceFormatted} km",
-            color = AccentYellow,
-            fontSize = 32.sp,
-            fontWeight = FontWeight.Bold
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            MetricCard(
-                modifier = Modifier.weight(1f),
-                label = "时间",
-                value = runData.timeFormatted,
-                unit = "",
-                valueColor = AccentYellow
+            Text(label, color = TextSecondary, fontSize = 14.sp)
+            Text(
+                text = value,
+                color = valueColor,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
             )
-            MetricCard(
-                modifier = Modifier.weight(1f),
-                label = "平均配速",
-                value = averagePaceFormatted(runData),
-                unit = "/km",
-                valueColor = if (runData.distanceMeters > 0f) AccentYellow else TextMuted
-            )
-        }
-
-        if (runData.maxHeartRate > 0) {
-            Surface(
-                color = BgColor,
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("最大心率", color = TextSecondary, fontSize = 14.sp)
-                    Text(
-                        text = "${runData.maxHeartRate} bpm",
-                        color = AccentRed,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
         }
     }
 }
@@ -409,7 +388,7 @@ private fun averagePaceFormatted(runData: RunData): String {
 }
 
 private fun formatFinishedAt(finishedAtMillis: Long): String {
-    return SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(finishedAtMillis))
+    return SimpleDateFormat("yyyy年MM月dd日 HH:mm:ss", Locale.getDefault()).format(Date(finishedAtMillis))
 }
 
 @Composable

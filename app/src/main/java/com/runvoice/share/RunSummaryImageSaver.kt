@@ -32,7 +32,7 @@ class RunSummaryImageSaver(private val context: Context) {
 
     private fun renderSummaryBitmap(runData: RunData, finishedAtMillis: Long): Bitmap {
         val width = 1080
-        val height = 1320
+        val height = 1600
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
@@ -44,121 +44,96 @@ class RunSummaryImageSaver(private val context: Context) {
         val textSecondary = 0xFFB0BEC5.toInt()
         val textMuted = 0xFF7F8C99.toInt()
 
-        val density = context.resources.displayMetrics.density
-        fun dp(value: Float) = value * density
-        fun sp(value: Float) = value * context.resources.displayMetrics.scaledDensity
+        val scale = width / 1080f
+        fun px(value: Float) = value * scale
 
         canvas.drawColor(bgColor)
 
         val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = textPrimary
-            textSize = sp(26f)
+            textSize = px(72f)
             isFakeBoldText = true
+            textAlign = Paint.Align.CENTER
         }
-        canvas.drawText(formatFinishedAt(finishedAtMillis), dp(20f), dp(52f), titlePaint)
+        val (dateText, timeText) = formatFinishedAtLines(finishedAtMillis)
+        canvas.drawText(dateText, width / 2f, px(112f), titlePaint)
+        canvas.drawText(timeText, width / 2f, px(206f), titlePaint)
 
-        val card = RectF(dp(20f), dp(84f), width - dp(20f), dp(520f))
+        val card = RectF(px(48f), px(286f), width - px(48f), px(1430f))
         val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = cardColor }
-        canvas.drawRoundRect(card, dp(16f), dp(16f), cardPaint)
+        canvas.drawRoundRect(card, px(28f), px(28f), cardPaint)
 
-        val smallTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = textSecondary
-            textSize = sp(14f)
-        }
-        canvas.drawText("当前记录", card.left + dp(16f), card.top + dp(28f), smallTextPaint)
-
-        val distancePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = accentYellow
-            textSize = sp(36f)
-            isFakeBoldText = true
-        }
-        canvas.drawText("${runData.distanceFormatted} km", card.left + dp(16f), card.top + dp(92f), distancePaint)
-
-        drawMetricBlock(
+        drawSummaryRow(
             canvas = canvas,
-            x = card.left + dp(16f),
-            y = card.top + dp(150f),
-            label = "时间",
-            value = runData.timeFormatted,
+            rect = RectF(card.left + px(28f), card.top + px(28f), card.right - px(28f), card.top + px(256f)),
+            label = "距离",
+            value = "${runData.distanceFormatted} km",
             valueColor = accentYellow,
+            bgColor = bgColor,
             labelColor = textSecondary
         )
-        drawMetricBlock(
+        drawSummaryRow(
             canvas = canvas,
-            x = card.left + dp(320f),
-            y = card.top + dp(150f),
+            rect = RectF(card.left + px(28f), card.top + px(284f), card.right - px(28f), card.top + px(512f)),
+            label = "总用时",
+            value = runData.timeFormatted,
+            valueColor = accentYellow,
+            bgColor = bgColor,
+            labelColor = textSecondary
+        )
+        drawSummaryRow(
+            canvas = canvas,
+            rect = RectF(card.left + px(28f), card.top + px(540f), card.right - px(28f), card.top + px(768f)),
             label = "平均配速",
-            value = averagePaceFormatted(runData),
+            value = "${averagePaceFormatted(runData)} /km",
             valueColor = if (runData.distanceMeters > 0f) accentYellow else textMuted,
-            labelColor = textSecondary,
-            unit = "/km"
+            bgColor = bgColor,
+            labelColor = textSecondary
         )
-        drawMetricBlock(
+        drawSummaryRow(
             canvas = canvas,
-            x = card.left + dp(16f),
-            y = card.top + dp(294f),
+            rect = RectF(card.left + px(28f), card.top + px(796f), card.right - px(28f), card.top + px(1024f)),
             label = "最大心率",
-            value = if (runData.maxHeartRate > 0) "${runData.maxHeartRate}" else "--",
+            value = if (runData.maxHeartRate > 0) "${runData.maxHeartRate} bpm" else "-- bpm",
             valueColor = if (runData.maxHeartRate > 0) accentRed else textMuted,
-            labelColor = textSecondary,
-            unit = "bpm"
+            bgColor = bgColor,
+            labelColor = textSecondary
         )
-    drawMetricBlock(
-            canvas = canvas,
-            x = card.left + dp(320f),
-            y = card.top + dp(294f),
-            label = "当前心率",
-            value = if (runData.heartRate > 0) "${runData.heartRate}" else "--",
-            valueColor = if (runData.heartRate > 0) accentYellow else textMuted,
-            labelColor = textSecondary,
-            unit = "bpm"
-        )
-
-        val notePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = textSecondary
-            textSize = sp(15f)
-        }
-        canvas.drawText("RunVoice", dp(20f), dp(590f), notePaint)
-        canvas.drawText("已保存的跑步结束截图，可用于后续分享。", dp(20f), dp(620f), notePaint)
 
         return bitmap
     }
 
-    private fun drawMetricBlock(
+    private fun drawSummaryRow(
         canvas: Canvas,
-        x: Float,
-        y: Float,
+        rect: RectF,
         label: String,
         value: String,
         valueColor: Int,
+        bgColor: Int,
         labelColor: Int,
-        unit: String = ""
     ) {
-        val density = context.resources.displayMetrics.density
-        fun sp(value: Float) = value * context.resources.displayMetrics.scaledDensity
-        fun dp(value: Float) = value * density
+        val scale = canvas.width / 1080f
+        fun px(value: Float) = value * scale
+
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = bgColor }
+        canvas.drawRoundRect(rect, px(24f), px(24f), bgPaint)
 
         val labelPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = labelColor
-            textSize = sp(14f)
+            textSize = px(54f)
+            isFakeBoldText = true
         }
         val valuePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = valueColor
-            textSize = sp(28f)
+            textSize = px(54f)
             isFakeBoldText = true
         }
-        val unitPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = labelColor
-            textSize = sp(14f)
-        }
 
-        canvas.drawText(label, x, y, labelPaint)
-        val valueBaseline = y + dp(48f)
-        canvas.drawText(value, x, valueBaseline, valuePaint)
-        if (unit.isNotEmpty()) {
-            val offset = valuePaint.measureText(value) + dp(6f)
-            canvas.drawText(unit, x + offset, valueBaseline, unitPaint)
-        }
+        val labelBaseline = rect.centerY() + px(18f)
+        val valueBaseline = rect.centerY() + px(18f)
+        canvas.drawText(label, rect.left + px(34f), labelBaseline, labelPaint)
+        val valueWidth = valuePaint.measureText(value)
+        canvas.drawText(value, rect.right - px(34f) - valueWidth, valueBaseline, valuePaint)
     }
 
     private fun saveWithMediaStore(bitmap: Bitmap, fileName: String): String {
@@ -198,7 +173,13 @@ class RunSummaryImageSaver(private val context: Context) {
     }
 
     private fun formatFinishedAt(timeMillis: Long): String {
-        return SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timeMillis))
+        return SimpleDateFormat("yyyy年MM月dd日 HH:mm:ss", Locale.getDefault()).format(Date(timeMillis))
+    }
+
+    private fun formatFinishedAtLines(timeMillis: Long): Pair<String, String> {
+        val date = SimpleDateFormat("yyyy年MM月dd日", Locale.getDefault()).format(Date(timeMillis))
+        val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timeMillis))
+        return date to time
     }
 
     private fun averagePaceFormatted(runData: RunData): String {
