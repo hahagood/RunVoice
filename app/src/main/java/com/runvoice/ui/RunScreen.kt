@@ -72,23 +72,35 @@ fun RunScreen(
     val imageSaver = remember(context) { RunSummaryImageSaver(context) }
     var showStopConfirm by remember { mutableStateOf(false) }
     var stopConfirmAtMillis by remember { mutableStateOf(0L) }
+    var stopSummaryRunData by remember { mutableStateOf<RunData?>(null) }
+    var runDataSaved by remember { mutableStateOf(false) }
 
     if (showStopConfirm) {
         StopRunConfirmScreen(
-            runData = runData,
+            runData = stopSummaryRunData ?: runData,
             finishedAtMillis = stopConfirmAtMillis.takeIf { it > 0L } ?: System.currentTimeMillis(),
+            runDataSaved = runDataSaved,
             onSaveAndStop = {
-                showStopConfirm = false
-                onSaveAndStop()
+                if (!runDataSaved) {
+                    onSaveAndStop()
+                    runDataSaved = true
+                    Toast.makeText(context, "本次数据已保存，可继续保存截图或返回首页", Toast.LENGTH_LONG).show()
+                }
             },
-            onDiscardAndStop = {
+            onExit = {
+                val wasSaved = runDataSaved
                 showStopConfirm = false
-                onDiscardAndStop()
+                stopSummaryRunData = null
+                runDataSaved = false
+                stopConfirmAtMillis = 0L
+                if (!wasSaved) {
+                    onDiscardAndStop()
+                }
             },
             onSaveSnapshot = { finishedAtMillis ->
                 scope.launch {
                     val message = withContext(Dispatchers.IO) {
-                        imageSaver.saveSummary(runData, finishedAtMillis)
+                        imageSaver.saveSummary(stopSummaryRunData ?: runData, finishedAtMillis)
                     }
                     Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                 }
@@ -183,6 +195,8 @@ fun RunScreen(
                     Button(
                         onClick = {
                             stopConfirmAtMillis = System.currentTimeMillis()
+                            stopSummaryRunData = runData
+                            runDataSaved = false
                             showStopConfirm = true
                         },
                         modifier = Modifier
@@ -239,8 +253,9 @@ fun RunScreen(
 private fun StopRunConfirmScreen(
     runData: RunData,
     finishedAtMillis: Long,
+    runDataSaved: Boolean,
     onSaveAndStop: () -> Unit,
-    onDiscardAndStop: () -> Unit,
+    onExit: () -> Unit,
     onSaveSnapshot: (Long) -> Unit
 ) {
     Column(
@@ -262,32 +277,14 @@ private fun StopRunConfirmScreen(
 
         StopRunHintCard(
             title = "请选择如何处理本次记录",
-            body = "保存后会保留本次跑步数据。放弃后，本次 GPS 轨迹文件也会一起删除。也可以先把当前摘要保存为本地截图。"
+            body = if (runDataSaved) {
+                "本次跑步数据已保存。你还可以继续把当前摘要保存为本地截图，完成后返回首页。"
+            } else {
+                "建议先保存截图，再保存本次跑步数据；如果不想保留本次记录，也可以直接返回首页。"
+            }
         )
 
         Spacer(modifier = Modifier.weight(1f))
-
-        Button(
-            onClick = onSaveAndStop,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
-            shape = RoundedCornerShape(14.dp)
-        ) {
-            Text("保存数据", fontSize = 20.sp, color = BgColor, fontWeight = FontWeight.Bold)
-        }
-
-        OutlinedButton(
-            onClick = onDiscardAndStop,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentRed),
-            shape = RoundedCornerShape(14.dp)
-        ) {
-            Text("放弃本次", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        }
 
         FilledTonalButton(
             onClick = { onSaveSnapshot(finishedAtMillis) },
@@ -301,6 +298,42 @@ private fun StopRunConfirmScreen(
             shape = RoundedCornerShape(14.dp)
         ) {
             Text("保存截图", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
+
+        Button(
+            onClick = onSaveAndStop,
+            enabled = !runDataSaved,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (runDataSaved) TextMuted else AccentGreen,
+                disabledContainerColor = TextMuted,
+                disabledContentColor = BgColor
+            ),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Text(
+                if (runDataSaved) "数据已保存" else "保存数据",
+                fontSize = 20.sp,
+                color = BgColor,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        OutlinedButton(
+            onClick = onExit,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentRed),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Text(
+                "返回首页",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }
