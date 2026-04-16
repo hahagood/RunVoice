@@ -19,7 +19,7 @@
 
 ## 截图
 
-<img src="screenshot.jpg" width="300" />
+<img src="screenshot.png" width="300" />
 
 ## 按钮交互
 
