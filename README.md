@@ -10,6 +10,7 @@
 - **GPS 轨迹留档** — 每次跑步自动保存原始定位点 CSV，记录定位点是否被接受、过滤原因、累计距离、分段距离和配速，便于和其他 APP 轨迹对比
 - **BLE 心率** — 标准蓝牙心率监控设备（0x180D 协议），扫描/配对/自动重连，连接即显示心率（无需开跑）
 - **语音播报** — 每跑完 1 公里中文语音播报：距离、用时、心率、配速；长时间活动达到 1 小时后自动改用“几小时几分几秒”格式
+- **短提示防吞字** — 对“开始跑步 / 已暂停 / 继续跑步 / 已放弃本次跑步记录”这类短控制提示，先播放一个极短的 `click/beep` 预热音，再触发中文 TTS，减少部分手机或蓝牙耳机链路的句首吞字
 - **耳机单击即时播报** — 跑步中支持通过蓝牙耳机的单击媒体键触发一次当前数据播报（已在真机验证）
 - **步频节拍器** — 160–220 BPM 可调，350Hz 正弦波脉冲，AudioTrack 硬件时钟驱动（无累积误差），状态自动记忆
 - **结束页截图保存** — 结束确认页支持将结束日期时间、距离、总用时、平均配速和最大心率保存为本地海报版图片，便于后续自行分享
@@ -37,13 +38,18 @@
 
 > "当前已跑2.35公里，用时12分30秒，当前心率142，最大心率156，配速5分18秒每公里"
 
+短控制提示说明：
+
+- “开始跑步”“已暂停”“继续跑步”“已放弃本次跑步记录” 当前使用“短提示音预热 + TTS”方案
+- 这是为了规避部分 Android 机型或蓝牙耳机在语音刚起播时吞掉前 1 到 2 个字的问题
+
 ## 技术栈
 
 - Kotlin + Jetpack Compose
 - Android Foreground Service
 - FusedLocationProviderClient（Google Play Services）
 - BLE 标准心率协议
-- Android TextToSpeech（中文）
+- Android TextToSpeech（中文）+ 短提示音预热
 
 ## 项目结构
 
@@ -63,7 +69,7 @@ app/src/main/java/com/runvoice/
 │   ├── HeartRateMonitor.kt     # BLE 心率
 │   └── RunTimer.kt             # 计时器
 ├── voice/
-│   ├── VoiceAnnouncer.kt       # TTS 语音播报
+│   ├── VoiceAnnouncer.kt       # TTS 语音播报 + 短提示音预热
 │   └── Metronome.kt            # 步频节拍器（AudioTrack PCM）
 └── model/
     └── RunData.kt              # 数据模型

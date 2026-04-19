@@ -1,7 +1,12 @@
 package com.runvoice.voice
 
 import android.content.Context
+import android.media.AudioManager
 import android.media.AudioAttributes
+import android.media.ToneGenerator
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.TextToSpeech
 import android.util.Log
@@ -11,11 +16,21 @@ class VoiceAnnouncer(context: Context) {
 
     companion object {
         private const val TAG = "RunVoiceTTS"
+        private const val PREWARM_DELAY_MS = 85L
+        private const val PREWARM_TONE_MS = 45
     }
 
     private var tts: TextToSpeech? = null
     private var ready = false
     private val pendingUtterances = ArrayDeque<Pair<String, String>>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var pendingSpeakRunnable: Runnable? = null
+    private val prewarmCueTexts = setOf("开始跑步", "已暂停", "继续跑步", "已放弃本次跑步记录")
+    private val toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 35)
+    private val speakParams = Bundle().apply {
+        putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+        putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
+    }
 
     init {
         tts = TextToSpeech(context.applicationContext) { status ->
@@ -52,6 +67,9 @@ class VoiceAnnouncer(context: Context) {
     }
 
     fun shutdown() {
+        pendingSpeakRunnable?.let(mainHandler::removeCallbacks)
+        pendingSpeakRunnable = null
+        toneGenerator.release()
         tts?.stop()
         tts?.shutdown()
         tts = null
@@ -64,8 +82,11 @@ class VoiceAnnouncer(context: Context) {
 
         engine.setAudioAttributes(
             AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                // Accessibility stream was silent on some OEM builds.
+                // Route spoken workout prompts through the normal media path instead.
+                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .setLegacyStreamType(AudioManager.STREAM_MUSIC)
                 .build()
         )
 
@@ -110,9 +131,24 @@ class VoiceAnnouncer(context: Context) {
             return
         }
 
-        val result = tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
-        if (result != TextToSpeech.SUCCESS) {
-            Log.w(TAG, "TTS speak failed for $utteranceId result=$result")
+        val engine = tts ?: return
+        engine.stop()
+        pendingSpeakRunnable?.let(mainHandler::removeCallbacks)
+
+        val speakAction = Runnable {
+            pendingSpeakRunnable = null
+            val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, speakParams, utteranceId)
+            if (result != TextToSpeech.SUCCESS) {
+                Log.w(TAG, "TTS speak failed for $utteranceId result=$result")
+            }
+        }
+
+        if (text in prewarmCueTexts) {
+            toneGenerator.startTone(ToneGenerator.TONE_PROP_BEEP2, PREWARM_TONE_MS)
+            pendingSpeakRunnable = speakAction
+            mainHandler.postDelayed(speakAction, PREWARM_DELAY_MS)
+        } else {
+            speakAction.run()
         }
     }
 
