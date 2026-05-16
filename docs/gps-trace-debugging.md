@@ -42,14 +42,22 @@
 - `accepted / distance_accumulated`
   该点被用于累计距离。
 
+- `accepted / gps_confirmed_movement`
+  加速度计判断静止，但 GPS 已经持续显示真实移动，因此该点仍被用于累计距离。
+
 - `ignored / accuracy_gt_20m`
   精度太差，被丢弃。
 
 - `ignored / jump_gt_100m`
   与前一点距离跳变过大，被视为异常点丢弃。
 
-- `ignored / motion_detector_stationary`
-  加速度计判断当前基本静止，定位漂移不计入距离。
+- `ignored / stationary_gps_still`
+  加速度计和 GPS 都判断当前基本静止，定位漂移不计入距离。
+
+- `ignored / stationary_waiting_for_gps_confirmation`
+  加速度计判断静止，GPS 出现移动迹象，但尚未持续达到确认阈值；先缓存观察，不立即计入距离。
+
+旧版本的 `ignored / motion_detector_stationary` 表示只要加速度计判断静止就丢弃该点；这可能在手机运动很平稳时误删真实跑步距离。
 
 ## 导出示例
 
@@ -66,5 +74,5 @@ adb pull /sdcard/Android/data/com.runvoice/files/gps-traces ./gps-traces
 3. 对比:
    - 是否大量点被 `accuracy_gt_20m` 丢弃
    - 是否有很多 `jump_gt_100m`
-   - 是否 `motion_detector_stationary` 触发过多
+   - 是否 `stationary_gps_still` 触发过多
    - `accepted` 点的总距离是否明显偏小

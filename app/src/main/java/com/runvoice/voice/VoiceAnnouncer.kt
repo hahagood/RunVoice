@@ -25,7 +25,6 @@ class VoiceAnnouncer(context: Context) {
     private val pendingUtterances = ArrayDeque<Pair<String, String>>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingSpeakRunnable: Runnable? = null
-    private val prewarmCueTexts = setOf("开始跑步", "已暂停", "继续跑步", "已放弃本次跑步记录")
     private val toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 35)
     private val speakParams = Bundle().apply {
         putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
@@ -143,13 +142,9 @@ class VoiceAnnouncer(context: Context) {
             }
         }
 
-        if (text in prewarmCueTexts) {
-            toneGenerator.startTone(ToneGenerator.TONE_PROP_BEEP2, PREWARM_TONE_MS)
-            pendingSpeakRunnable = speakAction
-            mainHandler.postDelayed(speakAction, PREWARM_DELAY_MS)
-        } else {
-            speakAction.run()
-        }
+        toneGenerator.startTone(ToneGenerator.TONE_PROP_BEEP2, PREWARM_TONE_MS)
+        pendingSpeakRunnable = speakAction
+        mainHandler.postDelayed(speakAction, PREWARM_DELAY_MS)
     }
 
     private fun flushPendingUtterances() {

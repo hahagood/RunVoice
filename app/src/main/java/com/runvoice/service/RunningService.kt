@@ -24,6 +24,7 @@ import com.runvoice.tracker.MotionDetector
 import com.runvoice.tracker.RunTimer
 import com.runvoice.voice.Metronome
 import com.runvoice.voice.VoiceAnnouncer
+import java.util.Calendar
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
@@ -39,6 +40,8 @@ class RunningService : Service() {
         const val ACTION_STOP = "com.runvoice.STOP"
         const val ACTION_TEST_ANNOUNCE = "com.runvoice.TEST_ANNOUNCE"
         const val ACTION_HANDLE_MEDIA_BUTTON = "com.runvoice.HANDLE_MEDIA_BUTTON"
+        private const val STATIONARY_PROMPT_DELAY_MS = 5_000L
+        private const val STATIONARY_PROMPT_MIN_INTERVAL_MS = 60_000L
     }
 
     inner class RunBinder : Binder() {
@@ -60,11 +63,13 @@ class RunningService : Service() {
     val runData: StateFlow<RunData> = _runData.asStateFlow()
 
     private var collectJob: Job? = null
+    private var stationaryPromptJob: Job? = null
     private var preRunHrJob: Job? = null
     private var lastKmAnnounced = 0
     private var maxHeartRate = 0
     private var mediaSession: MediaSession? = null
     private var lastMediaButtonHandledAt = 0L
+    private var lastStationaryPromptAt = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -139,6 +144,7 @@ class RunningService : Service() {
         }
 
         startCollecting()
+        startStationaryPromptObservation()
         voiceAnnouncer.speak("开始跑步")
     }
 
@@ -146,6 +152,7 @@ class RunningService : Service() {
         runTimer.pause()
         gpsTracker.pause()
         motionDetector.stop()
+        stationaryPromptJob?.cancel()
         _runData.update { it.copy(isPaused = true) }
         updateMediaSession(active = true, paused = true)
         updateNotification("已暂停")
@@ -156,6 +163,7 @@ class RunningService : Service() {
         runTimer.start(serviceScope)
         gpsTracker.resume()
         motionDetector.start()
+        startStationaryPromptObservation()
         _runData.update { it.copy(isPaused = false) }
         updateMediaSession(active = true, paused = false)
         voiceAnnouncer.speak("继续跑步")
@@ -171,6 +179,7 @@ class RunningService : Service() {
         }
 
         collectJob?.cancel()
+        stationaryPromptJob?.cancel()
         runTimer.reset()
         gpsTracker.stop(saveSession = saveSession)
         motionDetector.stop()
@@ -229,6 +238,29 @@ class RunningService : Service() {
                     updateNotification("跑步中 ${data.timeFormatted} · ${data.distanceFormatted}km")
                 }
             }
+        }
+    }
+
+    private fun startStationaryPromptObservation() {
+        stationaryPromptJob?.cancel()
+        stationaryPromptJob = serviceScope.launch {
+            gpsTracker.stationaryDetected
+                .collectLatest { stationary ->
+                    if (!stationary) return@collectLatest
+
+                    delay(STATIONARY_PROMPT_DELAY_MS)
+
+                    val data = _runData.value
+                    if (!gpsTracker.stationaryDetected.value || !data.isRunning || data.isPaused) {
+                        return@collectLatest
+                    }
+
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastStationaryPromptAt >= STATIONARY_PROMPT_MIN_INTERVAL_MS) {
+                        lastStationaryPromptAt = now
+                        voiceAnnouncer.speak("检测为静止")
+                    }
+                }
         }
     }
 
@@ -339,6 +371,7 @@ class RunningService : Service() {
         if (!data.isRunning) return
 
         val parts = buildList {
+            add("现在时间${formatCurrentTimeForSpeech()}")
             add("当前已跑${data.distanceFormatted}公里")
             add("用时${formatTimeForSpeech(data.elapsedSeconds)}")
             if (data.heartRate > 0) {
@@ -356,6 +389,13 @@ class RunningService : Service() {
         }
 
         voiceAnnouncer.speak(parts.joinToString("，"))
+    }
+
+    private fun formatCurrentTimeForSpeech(): String {
+        val now = Calendar.getInstance()
+        val hour = now.get(Calendar.HOUR_OF_DAY)
+        val minute = now.get(Calendar.MINUTE)
+        return "${hour}点${minute}分"
     }
 
     private fun formatPaceForSpeech(secondsPerKm: Int): String {
