@@ -18,6 +18,12 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
         private const val GPS_CONFIRMATION_DISTANCE_M = 40f
         private const val GPS_CONFIRMATION_DISPLACEMENT_M = 25f
         private const val GPS_CONFIRMATION_DURATION_MS = 15_000L
+        private const val GPS_CONFIRMATION_MIN_SPEED_MPS = 0.5f
+        private const val GPS_CONFIRMATION_MAX_SPEED_MPS = 5.5f
+        private const val GPS_CONFIRMATION_SPEED_WINDOW_SIZE = 5
+        private const val GPS_CONFIRMATION_MIN_STABLE_SPEED_SAMPLES = 4
+        private const val GPS_CONFIRMATION_MAX_SPEED_SPREAD_MPS = 2.5f
+        private const val GPS_CONFIRMATION_MAX_SPEED_RATIO = 3.0f
         private const val PACE_BUFFER_SIZE = 5
     }
 
@@ -47,6 +53,7 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
     private var pendingStationaryDistance = 0f
     private var pendingStationaryStartTime = 0L
     private var pendingStationaryStartLocation: Location? = null
+    private val pendingStationarySpeeds = ArrayDeque<Float>(GPS_CONFIRMATION_SPEED_WINDOW_SIZE)
 
     private val locationRequest = LocationRequest.Builder(
         Priority.PRIORITY_HIGH_ACCURACY, 2000L
@@ -113,20 +120,25 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
         }
 
         val motionState = motionDetector?.isMoving?.value
+        val wasStationary = _stationaryDetected.value
         val gpsIndicatesMovement = (loc.hasSpeed() && loc.speed >= GPS_MOVING_SPEED_MPS) ||
             d >= GPS_MOVING_STEP_DISTANCE_M
         var distanceToAdd = d
         var acceptedReason = "distance_accumulated"
 
-        if (motionState == false) {
+        if (motionState == false || wasStationary) {
             if (!gpsIndicatesMovement) {
                 resetStationaryGpsConfirmation()
                 _stationaryDetected.value = true
                 traceRecorder.record(
                     location = loc,
-                    motionState = false,
+                    motionState = motionState,
                     decision = "ignored",
-                    reason = "stationary_gps_still",
+                    reason = if (wasStationary && motionState != false) {
+                        "stationary_locked_gps_still"
+                    } else {
+                        "stationary_gps_still"
+                    },
                     deltaMeters = d,
                     totalDistanceMeters = totalDistance,
                     segmentDistanceMeters = segmentDistance,
@@ -136,26 +148,58 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
             }
 
             if (!gpsMovementOverride) {
+                val segmentSpeedMps = segmentSpeedMetersPerSecond(prev, loc, d)
+                if (!isPlausibleResumeSpeed(segmentSpeedMps)) {
+                    resetStationaryGpsConfirmation()
+                    _stationaryDetected.value = true
+                    traceRecorder.record(
+                        location = loc,
+                        motionState = motionState,
+                        decision = "ignored",
+                        reason = if (wasStationary && motionState != false) {
+                            "stationary_locked_rejected_resume_speed"
+                        } else {
+                            "stationary_rejected_resume_speed"
+                        },
+                        deltaMeters = d,
+                        totalDistanceMeters = totalDistance,
+                        segmentDistanceMeters = segmentDistance,
+                        paceSecondsPerKm = _paceSecondsPerKm.value
+                    )
+                    return
+                }
+
                 if (pendingStationaryStartLocation == null) {
                     pendingStationaryStartLocation = prev
                     pendingStationaryStartTime = prev.time
                     pendingStationaryDistance = 0f
                 }
                 pendingStationaryDistance += d
+                addPendingStationarySpeed(segmentSpeedMps!!)
 
                 val elapsedMs = loc.time - pendingStationaryStartTime
                 val displacement = pendingStationaryStartLocation?.distanceTo(loc) ?: 0f
                 val gpsMovementConfirmed = elapsedMs >= GPS_CONFIRMATION_DURATION_MS &&
                     pendingStationaryDistance >= GPS_CONFIRMATION_DISTANCE_M &&
-                    displacement >= GPS_CONFIRMATION_DISPLACEMENT_M
+                    displacement >= GPS_CONFIRMATION_DISPLACEMENT_M &&
+                    hasStableStationaryResumeSpeed()
 
                 if (!gpsMovementConfirmed) {
                     _stationaryDetected.value = true
                     traceRecorder.record(
                         location = loc,
-                        motionState = false,
+                        motionState = motionState,
                         decision = "ignored",
-                        reason = "stationary_waiting_for_gps_confirmation",
+                        reason = when {
+                            !hasStableStationaryResumeSpeed() && wasStationary && motionState != false ->
+                                "stationary_locked_waiting_for_stable_gps_speed"
+                            !hasStableStationaryResumeSpeed() ->
+                                "stationary_waiting_for_stable_gps_speed"
+                            wasStationary && motionState != false ->
+                                "stationary_locked_waiting_for_gps_confirmation"
+                            else ->
+                                "stationary_waiting_for_gps_confirmation"
+                        },
                         deltaMeters = d,
                         totalDistanceMeters = totalDistance,
                         segmentDistanceMeters = segmentDistance,
@@ -215,6 +259,38 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
         pendingStationaryDistance = 0f
         pendingStationaryStartTime = 0L
         pendingStationaryStartLocation = null
+        pendingStationarySpeeds.clear()
+    }
+
+    private fun segmentSpeedMetersPerSecond(prev: Location, loc: Location, distanceMeters: Float): Float? {
+        val elapsedSeconds = (loc.time - prev.time) / 1000f
+        return when {
+            elapsedSeconds > 0f -> distanceMeters / elapsedSeconds
+            loc.hasSpeed() -> loc.speed
+            else -> null
+        }
+    }
+
+    private fun isPlausibleResumeSpeed(speedMps: Float?): Boolean {
+        val speed = speedMps ?: return false
+        return speed in GPS_CONFIRMATION_MIN_SPEED_MPS..GPS_CONFIRMATION_MAX_SPEED_MPS
+    }
+
+    private fun addPendingStationarySpeed(speedMps: Float) {
+        if (pendingStationarySpeeds.size >= GPS_CONFIRMATION_SPEED_WINDOW_SIZE) {
+            pendingStationarySpeeds.removeFirst()
+        }
+        pendingStationarySpeeds.addLast(speedMps)
+    }
+
+    private fun hasStableStationaryResumeSpeed(): Boolean {
+        if (pendingStationarySpeeds.size < GPS_CONFIRMATION_MIN_STABLE_SPEED_SAMPLES) return false
+        val minSpeed = pendingStationarySpeeds.minOrNull() ?: return false
+        val maxSpeed = pendingStationarySpeeds.maxOrNull() ?: return false
+        if (minSpeed <= 0f) return false
+
+        return (maxSpeed - minSpeed) <= GPS_CONFIRMATION_MAX_SPEED_SPREAD_MPS &&
+            (maxSpeed / minSpeed) <= GPS_CONFIRMATION_MAX_SPEED_RATIO
     }
 
     private fun medianPace(): Int {

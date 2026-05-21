@@ -244,9 +244,17 @@ class RunningService : Service() {
     private fun startStationaryPromptObservation() {
         stationaryPromptJob?.cancel()
         stationaryPromptJob = serviceScope.launch {
+            var waitingForMovementResumePrompt = false
             gpsTracker.stationaryDetected
                 .collectLatest { stationary ->
-                    if (!stationary) return@collectLatest
+                    if (!stationary) {
+                        val data = _runData.value
+                        if (waitingForMovementResumePrompt && data.isRunning && !data.isPaused) {
+                            waitingForMovementResumePrompt = false
+                            voiceAnnouncer.speak("已恢复运动，继续计数")
+                        }
+                        return@collectLatest
+                    }
 
                     delay(STATIONARY_PROMPT_DELAY_MS)
 
@@ -258,6 +266,7 @@ class RunningService : Service() {
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastStationaryPromptAt >= STATIONARY_PROMPT_MIN_INTERVAL_MS) {
                         lastStationaryPromptAt = now
+                        waitingForMovementResumePrompt = true
                         voiceAnnouncer.speak("检测为静止")
                     }
                 }
