@@ -51,14 +51,17 @@ class VoiceAnnouncer(context: Context) {
     fun announceKilometer(km: Int, elapsedSeconds: Long, heartRate: Int, paceSecondsPerKm: Int) {
         val timeText = formatElapsedTimeForSpeech(elapsedSeconds)
 
-        val paceMin = paceSecondsPerKm / 60
-        val paceSec = paceSecondsPerKm % 60
-        val paceText = if (paceSecondsPerKm > 0) "配速${paceMin}分${paceSec}秒" else ""
+        val paceText = if (paceSecondsPerKm > 0) "配速${formatPaceForSpeech(paceSecondsPerKm)}" else ""
 
         val hrText = if (heartRate > 0) "，当前心率${heartRate}" else ""
         val text = "已跑${km}公里，用时${timeText}${hrText}，${paceText}"
 
         enqueueOrSpeak(text, "km_$km")
+    }
+
+    fun announceCurrentPace(paceSecondsPerKm: Int) {
+        if (paceSecondsPerKm <= 0) return
+        enqueueOrSpeak("当前配速${formatPaceForSpeech(paceSecondsPerKm)}每公里", "pace_${System.currentTimeMillis()}")
     }
 
     fun speak(text: String) {
@@ -163,5 +166,11 @@ class VoiceAnnouncer(context: Context) {
             if (minutes > 0) append("${minutes}分")
             append("${secs}秒")
         }
+    }
+
+    private fun formatPaceForSpeech(secondsPerKm: Int): String {
+        val minutes = secondsPerKm / 60
+        val seconds = secondsPerKm % 60
+        return "${minutes}分${seconds}秒"
     }
 }

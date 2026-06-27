@@ -42,6 +42,7 @@ class RunningService : Service() {
         const val ACTION_HANDLE_MEDIA_BUTTON = "com.runvoice.HANDLE_MEDIA_BUTTON"
         private const val STATIONARY_PROMPT_DELAY_MS = 5_000L
         private const val STATIONARY_PROMPT_MIN_INTERVAL_MS = 60_000L
+        private const val QUARTER_KM_METERS = 250
     }
 
     inner class RunBinder : Binder() {
@@ -66,6 +67,7 @@ class RunningService : Service() {
     private var stationaryPromptJob: Job? = null
     private var preRunHrJob: Job? = null
     private var lastKmAnnounced = 0
+    private var lastQuarterKmAnnounced = 0
     private var maxHeartRate = 0
     private var mediaSession: MediaSession? = null
     private var lastMediaButtonHandledAt = 0L
@@ -118,6 +120,7 @@ class RunningService : Service() {
     private fun startRun() {
         preRunHrJob?.cancel()
         lastKmAnnounced = 0
+        lastQuarterKmAnnounced = 0
         maxHeartRate = heartRateMonitor.heartRate.value.coerceAtLeast(0)
         _runData.value = RunData(
             heartRate = heartRateMonitor.heartRate.value,
@@ -225,12 +228,18 @@ class RunningService : Service() {
                 val currentKm = (data.distanceMeters / 1000).toInt()
                 if (currentKm > lastKmAnnounced && currentKm > 0) {
                     lastKmAnnounced = currentKm
+                    lastQuarterKmAnnounced = maxOf(
+                        lastQuarterKmAnnounced,
+                        (data.distanceMeters / QUARTER_KM_METERS).toInt()
+                    )
                     voiceAnnouncer.announceKilometer(
                         km = currentKm,
                         elapsedSeconds = data.elapsedSeconds,
                         heartRate = data.heartRate,
                         paceSecondsPerKm = data.paceSecondsPerKm
                     )
+                } else {
+                    announceQuarterKmPaceIfNeeded(data)
                 }
 
                 // Update notification every ~5 seconds
@@ -239,6 +248,19 @@ class RunningService : Service() {
                 }
             }
         }
+    }
+
+    private fun announceQuarterKmPaceIfNeeded(data: RunData) {
+        val currentQuarterKm = (data.distanceMeters / QUARTER_KM_METERS).toInt()
+        if (currentQuarterKm <= lastQuarterKmAnnounced) return
+        if (currentQuarterKm <= 0 || currentQuarterKm % 4 == 0) {
+            lastQuarterKmAnnounced = currentQuarterKm
+            return
+        }
+        if (data.paceSecondsPerKm <= 0) return
+
+        lastQuarterKmAnnounced = currentQuarterKm
+        voiceAnnouncer.announceCurrentPace(data.paceSecondsPerKm)
     }
 
     private fun startStationaryPromptObservation() {
@@ -344,7 +366,9 @@ class RunningService : Service() {
                     .build()
             )
             setMediaButtonReceiver(mediaButtonReceiver)
-            setMediaButtonBroadcastReceiver(ComponentName(this@RunningService, MediaButtonIntentReceiver::class.java))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                setMediaButtonBroadcastReceiver(ComponentName(this@RunningService, MediaButtonIntentReceiver::class.java))
+            }
             setCallback(object : MediaSession.Callback() {
                 override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
                     val event = extractMediaKeyEvent(mediaButtonIntent) ?: return false
@@ -389,8 +413,9 @@ class RunningService : Service() {
             if (data.maxHeartRate > 0) {
                 add("最大心率${data.maxHeartRate}")
             }
-            if (data.paceSecondsPerKm > 0) {
-                add("配速${formatPaceForSpeech(data.paceSecondsPerKm)}")
+            val averagePaceSecondsPerKm = averagePaceSecondsPerKm(data)
+            if (averagePaceSecondsPerKm > 0) {
+                add("平均配速${formatPaceForSpeech(averagePaceSecondsPerKm)}")
             }
             if (data.isPaused) {
                 add("当前已暂停")
@@ -405,6 +430,11 @@ class RunningService : Service() {
         val hour = now.get(Calendar.HOUR_OF_DAY)
         val minute = now.get(Calendar.MINUTE)
         return "${hour}点${minute}分"
+    }
+
+    private fun averagePaceSecondsPerKm(data: RunData): Int {
+        if (data.distanceMeters <= 0f || data.elapsedSeconds <= 0L) return 0
+        return ((data.elapsedSeconds * 1000f) / data.distanceMeters).toInt()
     }
 
     private fun formatPaceForSpeech(secondsPerKm: Int): String {
