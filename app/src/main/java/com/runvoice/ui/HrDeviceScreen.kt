@@ -1,5 +1,6 @@
 package com.runvoice.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +27,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -46,7 +48,8 @@ data class HrDeviceUiState(
     val scanning: Boolean = false,
     val devices: List<HrDeviceItem> = emptyList(),
     val connectedAddress: String? = null,
-    val savedAddress: String? = null
+    val savedAddress: String? = null,
+    val statusMessage: String? = null
 )
 
 data class HrDeviceItem(
@@ -64,6 +67,10 @@ fun HrDeviceScreen(
     onDisconnect: () -> Unit,
     onBack: () -> Unit
 ) {
+    BackHandler(onBack = onBack)
+    DisposableEffect(Unit) {
+        onDispose(onStopScan)
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -104,7 +111,7 @@ fun HrDeviceScreen(
         ) {
             when {
                 !state.available -> {
-                    Text("心率模块初始化中", fontSize = 18.sp, color = TextSecondary, fontWeight = FontWeight.Bold)
+                    Text("心率功能不可用", fontSize = 18.sp, color = TextSecondary, fontWeight = FontWeight.Bold)
                 }
                 state.scanning -> {
                 CircularProgressIndicator(
@@ -148,8 +155,14 @@ fun HrDeviceScreen(
             }
             !state.available -> {
                 EmptyStateCard(
-                    title = "心率模块正在准备",
-                    body = "页面刚打开时可能会有短暂初始化，稍等片刻后就可以开始搜索设备。"
+                    title = "心率功能当前不可用",
+                    body = state.statusMessage ?: "请确认手机支持并已开启蓝牙。跑步计时和 GPS 记录仍可正常使用。"
+                )
+            }
+            state.statusMessage != null -> {
+                EmptyStateCard(
+                    title = "心率设备状态",
+                    body = state.statusMessage
                 )
             }
             else -> {

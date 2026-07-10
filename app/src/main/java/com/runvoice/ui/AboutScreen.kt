@@ -78,6 +78,17 @@ fun AboutScreen(onBack: () -> Unit) {
 
             Spacer(modifier = Modifier.height(20.dp))
 
+            SectionTitle("数据与隐私")
+            SectionBody(
+                "跑步轨迹包含精确经纬度、时间、速度、海拔和心率，可能推断出住所、工作地点与健康状况。\n\n" +
+                "跑步期间，临时 CSV 保存在 App 专属目录。只有点击「保存数据」后，才会复制到 " +
+                "Documents/RunVoice/gps-traces；该公共副本不会随卸载自动删除。直接返回首页会删除未保存的临时轨迹。\n\n" +
+                "如需彻底删除，请同时检查系统文件管理器中的 Documents/RunVoice/gps-traces，" +
+                "以及 App 信息中的存储数据。分享 CSV 或截图前，请确认不会暴露私人路线。"
+            )
+
+            Spacer(modifier = Modifier.height(20.dp))
+
             SectionTitle("免责声明")
             SectionBody(
                 "使用 RunVoice 前请仔细阅读以下条款：\n\n" +

@@ -13,7 +13,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
@@ -23,10 +25,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.runvoice.model.RunData
 import com.runvoice.share.RunSummaryImageSaver
+import com.runvoice.tracker.TraceSaveResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -53,14 +58,16 @@ private val TextPrimary = Color(0xFFFFFFFF)
 private val TextSecondary = Color(0xFFB0BEC5)
 private val TextMuted = Color(0xFF7F8C99)
 
+private enum class RunSaveUiState { Ready, Saving, Saved, Failed }
+
 @Composable
 fun RunScreen(
     runData: RunData,
     onStart: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
-    onSaveAndStop: () -> Unit,
-    onDiscardAndStop: () -> Unit,
+    onSaveAndStop: suspend () -> TraceSaveResult,
+    onDiscardAndStop: suspend () -> TraceSaveResult,
     onOpenHrSettings: () -> Unit,
     onOpenAbout: () -> Unit = {},
     onToggleMetronome: () -> Unit = {},
@@ -71,40 +78,65 @@ fun RunScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val imageSaver = remember(context) { RunSummaryImageSaver(context) }
-    var showStopConfirm by remember { mutableStateOf(false) }
-    var stopConfirmAtMillis by remember { mutableStateOf(0L) }
+    var showStopConfirm by rememberSaveable { mutableStateOf(false) }
+    var stopConfirmAtMillis by rememberSaveable { mutableLongStateOf(0L) }
     var stopSummaryRunData by remember { mutableStateOf<RunData?>(null) }
-    var stopTraceCsvPath by remember { mutableStateOf<String?>(null) }
-    var runDataSaved by remember { mutableStateOf(false) }
+    var stopTraceCsvPath by rememberSaveable { mutableStateOf<String?>(null) }
+    var saveState by rememberSaveable { mutableStateOf(RunSaveUiState.Ready) }
+    var saveError by rememberSaveable { mutableStateOf<String?>(null) }
 
     if (showStopConfirm) {
         StopRunConfirmScreen(
             runData = stopSummaryRunData ?: runData,
             finishedAtMillis = stopConfirmAtMillis.takeIf { it > 0L } ?: System.currentTimeMillis(),
-            runDataSaved = runDataSaved,
+            saveState = saveState,
+            saveError = saveError,
             onSaveAndStop = {
-                if (!runDataSaved) {
-                    onSaveAndStop()
-                    runDataSaved = true
-                    Toast.makeText(context, "本次数据已保存，可继续保存截图或返回首页", Toast.LENGTH_LONG).show()
+                if (saveState != RunSaveUiState.Ready) return@StopRunConfirmScreen
+                saveState = RunSaveUiState.Saving
+                scope.launch {
+                    when (val result = onSaveAndStop()) {
+                        is TraceSaveResult.Saved -> {
+                            saveState = RunSaveUiState.Saved
+                            saveError = null
+                            Toast.makeText(context, "本次数据已保存到 ${result.publicPath}", Toast.LENGTH_LONG).show()
+                        }
+                        is TraceSaveResult.Failed -> {
+                            saveState = RunSaveUiState.Failed
+                            saveError = result.message
+                            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                        }
+                        TraceSaveResult.Discarded -> {
+                            saveState = RunSaveUiState.Failed
+                            saveError = "保存流程未生成轨迹文件"
+                        }
+                    }
                 }
             },
             onExit = {
-                val wasSaved = runDataSaved
+                val shouldDiscard = saveState == RunSaveUiState.Ready
                 showStopConfirm = false
                 stopSummaryRunData = null
                 stopTraceCsvPath = null
-                runDataSaved = false
+                saveState = RunSaveUiState.Ready
+                saveError = null
                 stopConfirmAtMillis = 0L
-                if (!wasSaved) {
-                    onDiscardAndStop()
+                if (shouldDiscard) {
+                    scope.launch {
+                        val result = onDiscardAndStop()
+                        if (result is TraceSaveResult.Failed) {
+                            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                        }
+                    }
                 }
             },
             onSaveSnapshot = { finishedAtMillis ->
                 val traceCsvPath = stopTraceCsvPath ?: currentTracePathForSnapshot()
                 scope.launch {
                     val message = withContext(Dispatchers.IO) {
-                        imageSaver.saveSummary(stopSummaryRunData ?: runData, finishedAtMillis, traceCsvPath)
+                        runCatching {
+                            imageSaver.saveSummary(stopSummaryRunData ?: runData, finishedAtMillis, traceCsvPath)
+                        }.getOrElse { "截图保存失败：${it.message ?: "未知错误"}" }
                     }
                     Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                 }
@@ -118,6 +150,7 @@ fun RunScreen(
             .fillMaxSize()
             .background(BgColor)
             .safeDrawingPadding()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
@@ -176,7 +209,7 @@ fun RunScreen(
             lineHeight = 20.sp
         )
 
-        Spacer(modifier = Modifier.weight(1f))
+        Spacer(modifier = Modifier.height(8.dp))
 
         when {
             !runData.isRunning -> {
@@ -201,7 +234,8 @@ fun RunScreen(
                             stopConfirmAtMillis = System.currentTimeMillis()
                             stopSummaryRunData = runData
                             stopTraceCsvPath = currentTracePathForSnapshot()
-                            runDataSaved = false
+                            saveState = RunSaveUiState.Ready
+                            saveError = null
                             showStopConfirm = true
                         },
                         modifier = Modifier
@@ -258,7 +292,8 @@ fun RunScreen(
 private fun StopRunConfirmScreen(
     runData: RunData,
     finishedAtMillis: Long,
-    runDataSaved: Boolean,
+    saveState: RunSaveUiState,
+    saveError: String?,
     onSaveAndStop: () -> Unit,
     onExit: () -> Unit,
     onSaveSnapshot: (Long) -> Unit
@@ -268,6 +303,7 @@ private fun StopRunConfirmScreen(
             .fillMaxSize()
             .background(BgColor)
             .safeDrawingPadding()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
@@ -282,14 +318,15 @@ private fun StopRunConfirmScreen(
 
         StopRunHintCard(
             title = "请选择如何处理本次记录",
-            body = if (runDataSaved) {
-                "本次跑步数据已保存。你还可以继续把当前摘要保存为本地截图，完成后返回首页。"
-            } else {
-                "建议先保存截图，再保存本次跑步数据；如果不想保留本次记录，也可以直接返回首页。"
+            body = when (saveState) {
+                RunSaveUiState.Saved -> "本次跑步数据已保存。你还可以继续把当前摘要保存为本地截图，完成后返回首页。"
+                RunSaveUiState.Saving -> "正在保存轨迹并导出到公共 Documents 目录，请稍候。"
+                RunSaveUiState.Failed -> saveError ?: "保存失败；应用内轨迹副本可能仍然保留。"
+                RunSaveUiState.Ready -> "建议先保存截图，再保存本次跑步数据；如果不想保留本次记录，也可以直接返回首页。"
             }
         )
 
-        Spacer(modifier = Modifier.weight(1f))
+        Spacer(modifier = Modifier.height(8.dp))
 
         FilledTonalButton(
             onClick = { onSaveSnapshot(finishedAtMillis) },
@@ -307,19 +344,24 @@ private fun StopRunConfirmScreen(
 
         Button(
             onClick = onSaveAndStop,
-            enabled = !runDataSaved,
+            enabled = saveState == RunSaveUiState.Ready,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (runDataSaved) TextMuted else AccentGreen,
+                containerColor = if (saveState == RunSaveUiState.Ready) AccentGreen else TextMuted,
                 disabledContainerColor = TextMuted,
                 disabledContentColor = BgColor
             ),
             shape = RoundedCornerShape(14.dp)
         ) {
             Text(
-                if (runDataSaved) "数据已保存" else "保存数据",
+                when (saveState) {
+                    RunSaveUiState.Ready -> "保存数据"
+                    RunSaveUiState.Saving -> "正在保存…"
+                    RunSaveUiState.Saved -> "数据已保存"
+                    RunSaveUiState.Failed -> "保存失败"
+                },
                 fontSize = 20.sp,
                 color = BgColor,
                 fontWeight = FontWeight.Bold
@@ -328,6 +370,7 @@ private fun StopRunConfirmScreen(
 
         OutlinedButton(
             onClick = onExit,
+            enabled = saveState != RunSaveUiState.Saving,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
@@ -364,7 +407,7 @@ private fun StopRunSummaryCard(runData: RunData) {
         )
         StopRunSummaryRow(
             label = "平均配速",
-            value = "${averagePaceFormatted(runData)} /km",
+            value = "${runData.averagePaceFormatted} /km",
             valueColor = if (runData.distanceMeters > 0f) AccentYellow else TextMuted
         )
         StopRunSummaryRow(
@@ -415,14 +458,6 @@ private fun StopRunHintCard(title: String, body: String) {
         Text(title, color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Text(body, color = TextSecondary, fontSize = 15.sp, lineHeight = 22.sp)
     }
-}
-
-private fun averagePaceFormatted(runData: RunData): String {
-    if (runData.distanceMeters <= 0f || runData.elapsedSeconds <= 0L) return "--'--\""
-    val secondsPerKm = ((runData.elapsedSeconds * 1000f) / runData.distanceMeters).toInt()
-    val minutes = secondsPerKm / 60
-    val seconds = secondsPerKm % 60
-    return "%d'%02d\"".format(minutes, seconds)
 }
 
 private fun formatFinishedAt(finishedAtMillis: Long): String {

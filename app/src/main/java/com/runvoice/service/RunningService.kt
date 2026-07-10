@@ -17,14 +17,21 @@ import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import com.runvoice.MainActivity
 import com.runvoice.R
+import com.runvoice.core.RunCommand
+import com.runvoice.core.RunSessionController
+import com.runvoice.core.AnnouncementEvent
+import com.runvoice.core.AnnouncementPolicy
 import com.runvoice.model.RunData
 import com.runvoice.tracker.GpsTracker
 import com.runvoice.tracker.HeartRateMonitor
+import com.runvoice.tracker.HeartRateState
 import com.runvoice.tracker.MotionDetector
 import com.runvoice.tracker.RunTimer
+import com.runvoice.tracker.TraceSaveResult
 import com.runvoice.voice.Metronome
 import com.runvoice.voice.VoiceAnnouncer
 import java.util.Calendar
+import java.util.Locale
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
@@ -42,7 +49,6 @@ class RunningService : Service() {
         const val ACTION_HANDLE_MEDIA_BUTTON = "com.runvoice.HANDLE_MEDIA_BUTTON"
         private const val STATIONARY_PROMPT_DELAY_MS = 5_000L
         private const val STATIONARY_PROMPT_MIN_INTERVAL_MS = 60_000L
-        private const val QUARTER_KM_METERS = 250
     }
 
     inner class RunBinder : Binder() {
@@ -51,23 +57,26 @@ class RunningService : Service() {
 
     private val binder = RunBinder()
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val sessionController = RunSessionController()
+    private val announcementPolicy = AnnouncementPolicy()
     private lateinit var prefs: SharedPreferences
 
-    lateinit var gpsTracker: GpsTracker
-    lateinit var heartRateMonitor: HeartRateMonitor
-    lateinit var runTimer: RunTimer
-    lateinit var voiceAnnouncer: VoiceAnnouncer
-    lateinit var metronome: Metronome
-    lateinit var motionDetector: MotionDetector
+    private lateinit var gpsTracker: GpsTracker
+    private lateinit var heartRateMonitor: HeartRateMonitor
+    private lateinit var runTimer: RunTimer
+    private lateinit var voiceAnnouncer: VoiceAnnouncer
+    private lateinit var metronome: Metronome
+    private lateinit var motionDetector: MotionDetector
 
     private val _runData = MutableStateFlow(RunData())
     val runData: StateFlow<RunData> = _runData.asStateFlow()
+    val heartRateState: StateFlow<HeartRateState> get() = heartRateMonitor.state
+    val heartRateScanning: StateFlow<Boolean> get() = heartRateMonitor.scanning
+    val heartRateDevices: StateFlow<List<HeartRateMonitor.BleDevice>> get() = heartRateMonitor.discoveredDevices
 
     private var collectJob: Job? = null
     private var stationaryPromptJob: Job? = null
     private var preRunHrJob: Job? = null
-    private var lastKmAnnounced = 0
-    private var lastQuarterKmAnnounced = 0
     private var maxHeartRate = 0
     private var mediaSession: MediaSession? = null
     private var lastMediaButtonHandledAt = 0L
@@ -105,7 +114,7 @@ class RunningService : Service() {
             ACTION_START -> startRun()
             ACTION_PAUSE -> pauseRun()
             ACTION_RESUME -> resumeRun()
-            ACTION_STOP -> stopRun()
+            ACTION_STOP -> serviceScope.launch { stopRun() }
             ACTION_HANDLE_MEDIA_BUTTON,
             Intent.ACTION_MEDIA_BUTTON -> dispatchMediaButtonIntent(intent)
             ACTION_TEST_ANNOUNCE -> {
@@ -118,13 +127,17 @@ class RunningService : Service() {
                 )
             }
         }
-        return START_STICKY
+        // A run is intentionally not recreated without a persisted checkpoint.
+        return START_NOT_STICKY
     }
 
     private fun startRun() {
+        if (!sessionController.dispatch(RunCommand.Start).accepted) {
+            Log.w(TAG, "Ignoring Start in ${sessionController.state}")
+            return
+        }
         preRunHrJob?.cancel()
-        lastKmAnnounced = 0
-        lastQuarterKmAnnounced = 0
+        announcementPolicy.reset()
         maxHeartRate = heartRateMonitor.heartRate.value.coerceAtLeast(0)
         _runData.value = RunData(
             heartRate = heartRateMonitor.heartRate.value,
@@ -143,7 +156,20 @@ class RunningService : Service() {
         updateMediaSession(active = true, paused = false)
 
         runTimer.start(serviceScope)
-        gpsTracker.start()
+        val gpsStart = gpsTracker.start()
+        if (gpsStart.isFailure) {
+            Log.e(TAG, "Unable to start GPS tracking", gpsStart.exceptionOrNull())
+            runTimer.reset()
+            gpsTracker.stop(saveSession = false)
+            sessionController.dispatch(RunCommand.BeginFinish)
+            sessionController.dispatch(RunCommand.CompleteFinish)
+            _runData.update { it.copy(isRunning = false, isPaused = false) }
+            updateMediaSession(active = false, paused = false)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            startPreRunHrObservation()
+            voiceAnnouncer.speak("无法启动定位，本次跑步未开始")
+            return
+        }
         motionDetector.start()
         // Only connect if not already connected
         if (!heartRateMonitor.connected.value) {
@@ -156,6 +182,10 @@ class RunningService : Service() {
     }
 
     private fun pauseRun() {
+        if (!sessionController.dispatch(RunCommand.Pause).accepted) {
+            Log.w(TAG, "Ignoring Pause in ${sessionController.state}")
+            return
+        }
         runTimer.pause()
         gpsTracker.pause()
         motionDetector.stop()
@@ -167,8 +197,20 @@ class RunningService : Service() {
     }
 
     private fun resumeRun() {
+        if (!sessionController.dispatch(RunCommand.Resume).accepted) {
+            Log.w(TAG, "Ignoring Resume in ${sessionController.state}")
+            return
+        }
         runTimer.start(serviceScope)
-        gpsTracker.resume()
+        val gpsResume = gpsTracker.resume()
+        if (gpsResume.isFailure) {
+            Log.e(TAG, "Unable to resume GPS tracking", gpsResume.exceptionOrNull())
+            runTimer.pause()
+            sessionController.dispatch(RunCommand.Pause)
+            _runData.update { it.copy(isPaused = true) }
+            voiceAnnouncer.speak("无法恢复定位，跑步仍保持暂停")
+            return
+        }
         motionDetector.start()
         startStationaryPromptObservation()
         _runData.update { it.copy(isPaused = false) }
@@ -176,11 +218,15 @@ class RunningService : Service() {
         voiceAnnouncer.speak("继续跑步")
     }
 
-    fun stopRun(saveSession: Boolean = true) {
+    suspend fun stopRun(saveSession: Boolean = true): TraceSaveResult {
+        if (!sessionController.dispatch(RunCommand.BeginFinish).accepted) {
+            Log.w(TAG, "Ignoring Finish in ${sessionController.state}")
+            return TraceSaveResult.Failed("当前状态不能结束跑步")
+        }
         val data = _runData.value
         if (saveSession) {
             val km = data.distanceKm
-            voiceAnnouncer.speak("跑步结束，总距离${String.format("%.1f", km)}公里，用时${formatTimeForSpeech(data.elapsedSeconds)}")
+            voiceAnnouncer.speak("跑步结束，总距离${String.format(Locale.getDefault(), "%.1f", km)}公里，用时${formatTimeForSpeech(data.elapsedSeconds)}")
         } else {
             voiceAnnouncer.speak("已放弃本次跑步记录")
         }
@@ -188,28 +234,45 @@ class RunningService : Service() {
         collectJob?.cancel()
         stationaryPromptJob?.cancel()
         runTimer.reset()
-        gpsTracker.stop(saveSession = saveSession)
+        gpsTracker.stopUpdates()
         motionDetector.stop()
+        val saveResult = withContext(Dispatchers.IO) {
+            gpsTracker.closeTrace(saveSession = saveSession)
+        }
         // Keep HR monitor connected — don't disconnect
 
         // Keep last data visible, just mark as stopped
         _runData.update { it.copy(isRunning = false, isPaused = false) }
+        sessionController.dispatch(RunCommand.CompleteFinish)
         updateMediaSession(active = false, paused = false)
         startPreRunHrObservation()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+        return saveResult
     }
 
     private fun startCollecting() {
         collectJob?.cancel()
         collectJob = serviceScope.launch {
-            combine(
+            val trackingState = combine(
                 runTimer.elapsedSeconds,
                 gpsTracker.distanceMeters,
                 gpsTracker.paceSecondsPerKm,
                 heartRateMonitor.heartRate,
                 heartRateMonitor.connected
             ) { elapsed, distance, pace, hr, hrConn ->
+                TrackingHrState(elapsed, distance, pace, hr, hrConn)
+            }
+            combine(
+                trackingState,
+                metronome.isPlaying,
+                metronome.bpm
+            ) { tracking, metroActive, metroBpm ->
+                val elapsed = tracking.elapsed
+                val distance = tracking.distance
+                val pace = tracking.pace
+                val hr = tracking.hr
+                val hrConn = tracking.hrConnected
                 val currentMaxHr = maxOf(maxHeartRate, hr)
                 maxHeartRate = currentMaxHr
                 RunData(
@@ -221,29 +284,22 @@ class RunningService : Service() {
                     isRunning = true,
                     isPaused = _runData.value.isPaused,
                     hrDeviceConnected = hrConn,
-                    lastKmAnnounced = lastKmAnnounced,
-                    metronomeActive = metronome.isPlaying.value,
-                    metronomeBpm = metronome.bpm.value
+                    metronomeActive = metroActive,
+                    metronomeBpm = metroBpm
                 )
             }.collect { data ->
                 _runData.value = data
 
-                // Check if we crossed a new kilometer
-                val currentKm = (data.distanceMeters / 1000).toInt()
-                if (currentKm > lastKmAnnounced && currentKm > 0) {
-                    lastKmAnnounced = currentKm
-                    lastQuarterKmAnnounced = maxOf(
-                        lastQuarterKmAnnounced,
-                        (data.distanceMeters / QUARTER_KM_METERS).toInt()
-                    )
-                    voiceAnnouncer.announceKilometer(
-                        km = currentKm,
-                        elapsedSeconds = data.elapsedSeconds,
-                        heartRate = data.heartRate,
-                        paceSecondsPerKm = data.paceSecondsPerKm
-                    )
-                } else {
-                    announceQuarterKmPaceIfNeeded(data)
+                announcementPolicy.eventsFor(data.distanceMeters, data.paceSecondsPerKm).forEach { event ->
+                    when (event) {
+                        is AnnouncementEvent.Kilometer -> voiceAnnouncer.announceKilometer(
+                            km = event.kilometer,
+                            elapsedSeconds = data.elapsedSeconds,
+                            heartRate = data.heartRate,
+                            paceSecondsPerKm = data.paceSecondsPerKm
+                        )
+                        is AnnouncementEvent.CurrentPace -> voiceAnnouncer.announceCurrentPace(event.paceSecondsPerKm)
+                    }
                 }
 
                 // Update notification every ~5 seconds
@@ -254,18 +310,13 @@ class RunningService : Service() {
         }
     }
 
-    private fun announceQuarterKmPaceIfNeeded(data: RunData) {
-        val currentQuarterKm = (data.distanceMeters / QUARTER_KM_METERS).toInt()
-        if (currentQuarterKm <= lastQuarterKmAnnounced) return
-        if (currentQuarterKm <= 0 || currentQuarterKm % 4 == 0) {
-            lastQuarterKmAnnounced = currentQuarterKm
-            return
-        }
-        if (data.paceSecondsPerKm <= 0) return
-
-        lastQuarterKmAnnounced = currentQuarterKm
-        voiceAnnouncer.announceCurrentPace(data.paceSecondsPerKm)
-    }
+    private data class TrackingHrState(
+        val elapsed: Long,
+        val distance: Float,
+        val pace: Int,
+        val hr: Int,
+        val hrConnected: Boolean
+    )
 
     private fun startStationaryPromptObservation() {
         stationaryPromptJob?.cancel()
@@ -425,7 +476,7 @@ class RunningService : Service() {
             if (data.maxHeartRate > 0) {
                 add("最大心率${data.maxHeartRate}")
             }
-            val averagePaceSecondsPerKm = averagePaceSecondsPerKm(data)
+            val averagePaceSecondsPerKm = data.averagePaceSecondsPerKm
             if (averagePaceSecondsPerKm > 0) {
                 add("平均配速${formatPaceForSpeech(averagePaceSecondsPerKm)}")
             }
@@ -442,11 +493,6 @@ class RunningService : Service() {
         val hour = now.get(Calendar.HOUR_OF_DAY)
         val minute = now.get(Calendar.MINUTE)
         return "${hour}点${minute}分"
-    }
-
-    private fun averagePaceSecondsPerKm(data: RunData): Int {
-        if (data.distanceMeters <= 0f || data.elapsedSeconds <= 0L) return 0
-        return ((data.elapsedSeconds * 1000f) / data.distanceMeters).toInt()
     }
 
     private fun formatPaceForSpeech(secondsPerKm: Int): String {
@@ -532,6 +578,19 @@ class RunningService : Service() {
         prefs.edit().putInt("metronome_bpm", metronome.bpm.value).apply()
     }
 
+    fun startHeartRateScan() = heartRateMonitor.startScan()
+
+    fun stopHeartRateScan() = heartRateMonitor.stopScan()
+
+    fun savedHeartRateDeviceAddress(): String? = heartRateMonitor.getSavedDeviceAddress()
+
+    fun selectHeartRateDevice(address: String) {
+        heartRateMonitor.saveDevice(address)
+        heartRateMonitor.connectToDevice(address)
+    }
+
+    fun disconnectHeartRateDevice() = heartRateMonitor.clearSavedDevice()
+
     fun currentTracePathForSnapshot(): String? {
         gpsTracker.flushTrace()
         return gpsTracker.currentTracePath()
@@ -543,7 +602,7 @@ class RunningService : Service() {
         serviceScope.cancel()
         voiceAnnouncer.shutdown()
         metronome.release()
-        gpsTracker.stop()
+        gpsTracker.stop(saveSession = false)
         heartRateMonitor.disconnect()
         // Clear metronome active flag so it won't auto-restart if system recreates the service
         prefs.edit().putBoolean("metronome_active", false).apply()

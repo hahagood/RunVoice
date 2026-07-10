@@ -23,6 +23,8 @@ class VoiceAnnouncer(context: Context) {
 
     private var tts: TextToSpeech? = null
     private var ready = false
+    private var failed = false
+    private var speaking = false
     private val pendingUtterances = ArrayDeque<Pair<String, String>>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingSpeakRunnable: Runnable? = null
@@ -49,6 +51,8 @@ class VoiceAnnouncer(context: Context) {
             if (status == TextToSpeech.SUCCESS) {
                 configureTts()
             } else {
+                failed = true
+                pendingUtterances.clear()
                 Log.w(TAG, "TTS init failed with status=$status")
             }
         }
@@ -90,6 +94,7 @@ class VoiceAnnouncer(context: Context) {
         tts?.shutdown()
         tts = null
         ready = false
+        speaking = false
         pendingUtterances.clear()
     }
 
@@ -105,12 +110,12 @@ class VoiceAnnouncer(context: Context) {
 
             override fun onDone(utteranceId: String?) {
                 Log.d(TAG, "TTS utterance done: $utteranceId")
-                audioManager.abandonAudioFocusRequest(audioFocusRequest)
+                finishUtterance()
             }
 
             override fun onError(utteranceId: String?) {
                 Log.w(TAG, "TTS utterance failed: $utteranceId")
-                audioManager.abandonAudioFocusRequest(audioFocusRequest)
+                finishUtterance()
             }
         })
 
@@ -141,22 +146,30 @@ class VoiceAnnouncer(context: Context) {
     )
 
     private fun enqueueOrSpeak(text: String, utteranceId: String) {
+        if (failed) {
+            Log.w(TAG, "Ignoring TTS after initialization failure: $utteranceId")
+            return
+        }
+        pendingUtterances.addLast(text to utteranceId)
         if (!ready) {
-            pendingUtterances.addLast(text to utteranceId)
             Log.d(TAG, "Queueing TTS before init: $utteranceId")
             return
         }
+        speakNextIfIdle()
+    }
 
+    private fun speakNextIfIdle() {
+        if (!ready || speaking || pendingUtterances.isEmpty()) return
         val engine = tts ?: return
-        engine.stop()
-        pendingSpeakRunnable?.let(mainHandler::removeCallbacks)
+        val (text, utteranceId) = pendingUtterances.removeFirst()
+        speaking = true
 
         val speakAction = Runnable {
             pendingSpeakRunnable = null
             val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, speakParams, utteranceId)
             if (result != TextToSpeech.SUCCESS) {
                 Log.w(TAG, "TTS speak failed for $utteranceId result=$result")
-                audioManager.abandonAudioFocusRequest(audioFocusRequest)
+                finishUtterance()
             }
         }
 
@@ -164,6 +177,14 @@ class VoiceAnnouncer(context: Context) {
         toneGenerator.startTone(ToneGenerator.TONE_PROP_BEEP2, PREWARM_TONE_MS)
         pendingSpeakRunnable = speakAction
         mainHandler.postDelayed(speakAction, PREWARM_DELAY_MS)
+    }
+
+    private fun finishUtterance() {
+        mainHandler.post {
+            audioManager.abandonAudioFocusRequest(audioFocusRequest)
+            speaking = false
+            speakNextIfIdle()
+        }
     }
 
     private fun requestSpeechAudioFocus(utteranceId: String) {
@@ -174,10 +195,7 @@ class VoiceAnnouncer(context: Context) {
     }
 
     private fun flushPendingUtterances() {
-        while (pendingUtterances.isNotEmpty()) {
-            val (text, id) = pendingUtterances.removeFirst()
-            enqueueOrSpeak(text, id)
-        }
+        speakNextIfIdle()
     }
 
     private fun formatElapsedTimeForSpeech(seconds: Long): String {

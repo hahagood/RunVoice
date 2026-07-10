@@ -1,6 +1,5 @@
 package com.runvoice.share
 
-import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -8,31 +7,26 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PointF
 import android.graphics.RectF
-import android.os.Build
-import android.os.Environment
-import android.provider.MediaStore
 import android.text.TextPaint
 import com.runvoice.model.RunData
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.floor
 import kotlin.math.hypot
 
 class RunSummaryImageSaver(private val context: Context) {
+    private val traceReader = TraceCsvReader()
+    private val traceGeometry = TraceGeometry()
+    private val storage = RunSummaryImageStorage(context)
 
     fun saveSummary(runData: RunData, finishedAtMillis: Long, traceCsvPath: String? = null): String {
         val fileName = "RunVoice-${timestampForFile(finishedAtMillis)}.png"
         val bitmap = renderSummaryBitmap(runData, finishedAtMillis, traceCsvPath)
 
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            saveWithMediaStore(bitmap, fileName)
-        } else {
-            saveToAppStorage(bitmap, fileName)
+        return try {
+            storage.save(bitmap, fileName)
+        } finally {
+            bitmap.recycle()
         }
     }
 
@@ -53,7 +47,7 @@ class RunSummaryImageSaver(private val context: Context) {
         val scale = width / 1080f
         fun px(value: Float) = value * scale
 
-        val tracePoints = readAcceptedTracePoints(traceCsvPath)
+        val tracePoints = traceReader.readAccepted(traceCsvPath)
 
         canvas.drawColor(bgColor)
 
@@ -119,7 +113,7 @@ class RunSummaryImageSaver(private val context: Context) {
             SummaryRow(
                 rect = RectF(card.left + px(28f), card.top + px(540f), card.right - px(28f), card.top + px(768f)),
                 label = "平均配速",
-                value = "${averagePaceFormatted(runData)} /km",
+                value = "${runData.averagePaceFormatted} /km",
                 valueColor = if (runData.distanceMeters > 0f) accentYellow else textMuted
             ),
             SummaryRow(
@@ -341,7 +335,7 @@ class RunSummaryImageSaver(private val context: Context) {
     }
 
     private fun projectTracePointsWithRepeatLevels(points: List<TracePoint>, rect: RectF): List<ScreenTracePoint>? {
-        val projected = projectTracePointsToMeters(points)
+        val projected = traceGeometry.analyze(points)
         val minX = projected.minOf { it.xMeters }
         val maxX = projected.maxOf { it.xMeters }
         val minY = projected.minOf { it.yMeters }
@@ -355,8 +349,6 @@ class RunSummaryImageSaver(private val context: Context) {
         val projectionScale = scaleCandidates.minOrNull() ?: return null
         val centerX = (minX + maxX) / 2.0
         val centerY = (minY + maxY) / 2.0
-        val repeatLevels = detectRepeatLevels(projected)
-
         return projected.mapIndexed { index, point ->
             ScreenTracePoint(
                 point = PointF(
@@ -364,122 +356,7 @@ class RunSummaryImageSaver(private val context: Context) {
                     rect.centerY() - ((point.yMeters - centerY) * projectionScale).toFloat()
                 ),
                 distanceMeters = point.distanceMeters,
-                repeatLevel = repeatLevels[index]
-            )
-        }
-    }
-
-    private fun detectRepeatLevels(points: List<ProjectedTracePoint>): IntArray {
-        if (points.size < 3) return IntArray(points.size)
-
-        val rawLevels = IntArray(points.size)
-        val cellSizeMeters = 40.0
-        val closeDistanceSquared = 35.0 * 35.0
-        val minDistanceGapMeters = 300f
-        val minDirectionAlignment = 0.5
-        val directionVectors = points.indices.map { directionVector(points, it) }
-        val grid = mutableMapOf<GridKey, MutableList<Int>>()
-
-        points.forEachIndexed { index, point ->
-            val cellX = floor(point.xMeters / cellSizeMeters).toInt()
-            val cellY = floor(point.yMeters / cellSizeMeters).toInt()
-            var bestLevel = 0
-            val currentVector = directionVectors[index]
-            val currentVectorLength = currentVector.length()
-
-            for (offsetX in -1..1) {
-                for (offsetY in -1..1) {
-                    val candidateIndices = grid[GridKey(cellX + offsetX, cellY + offsetY)] ?: continue
-                    candidateIndices.forEach { candidateIndex ->
-                        val candidate = points[candidateIndex]
-                        if (point.distanceMeters - candidate.distanceMeters < minDistanceGapMeters) {
-                            return@forEach
-                        }
-
-                        val dx = point.xMeters - candidate.xMeters
-                        val dy = point.yMeters - candidate.yMeters
-                        if (dx * dx + dy * dy > closeDistanceSquared) {
-                            return@forEach
-                        }
-
-                        val candidateVector = directionVectors[candidateIndex]
-                        val candidateVectorLength = candidateVector.length()
-                        if (currentVectorLength > 0.1 && candidateVectorLength > 0.1) {
-                            val directionCosine = currentVector.dot(candidateVector) / (currentVectorLength * candidateVectorLength)
-                            if (abs(directionCosine) < minDirectionAlignment) {
-                                return@forEach
-                            }
-                        }
-
-                        bestLevel = maxOf(bestLevel, (rawLevels[candidateIndex] + 1).coerceAtMost(MAX_REPEAT_LEVEL))
-                    }
-                }
-            }
-
-            rawLevels[index] = bestLevel
-            grid.getOrPut(GridKey(cellX, cellY)) { mutableListOf() }.add(index)
-        }
-
-        return smoothRepeatLevels(points, rawLevels)
-    }
-
-    private fun smoothRepeatLevels(points: List<ProjectedTracePoint>, rawLevels: IntArray): IntArray {
-        val levels = IntArray(rawLevels.size)
-        val minRepeatRunMeters = 180f
-        var index = 0
-        var lastAcceptedLevel = 0
-
-        while (index < rawLevels.size) {
-            if (rawLevels[index] <= 0) {
-                index++
-                continue
-            }
-
-            val startIndex = index
-            val rawLevel = rawLevels[startIndex].coerceAtMost(MAX_REPEAT_LEVEL)
-            while (index < rawLevels.size && rawLevels[index].coerceAtMost(MAX_REPEAT_LEVEL) == rawLevel) {
-                index++
-            }
-            val endIndex = index - 1
-            val runDistance = points[endIndex].distanceMeters - points[startIndex].distanceMeters
-            val chosenLevel = if (runDistance >= minRepeatRunMeters) {
-                rawLevel
-            } else if (lastAcceptedLevel > 0 && rawLevel > lastAcceptedLevel) {
-                lastAcceptedLevel
-            } else {
-                0
-            }
-            for (levelIndex in startIndex..endIndex) {
-                levels[levelIndex] = chosenLevel
-            }
-            if (chosenLevel > 0) {
-                lastAcceptedLevel = chosenLevel
-            }
-        }
-
-        return levels
-    }
-
-    private fun directionVector(points: List<ProjectedTracePoint>, index: Int): Vector {
-        val startIndex = (index - 2).coerceAtLeast(0)
-        val endIndex = (index + 2).coerceAtMost(points.lastIndex)
-        if (startIndex == endIndex) return Vector(0.0, 0.0)
-        return Vector(
-            x = points[endIndex].xMeters - points[startIndex].xMeters,
-            y = points[endIndex].yMeters - points[startIndex].yMeters
-        )
-    }
-
-    private fun projectTracePointsToMeters(points: List<TracePoint>): List<ProjectedTracePoint> {
-        val centerLatitude = points.map { it.latitude }.average()
-        val centerLongitude = points.map { it.longitude }.average()
-        val longitudeMeterScale = METERS_PER_DEGREE * cos(Math.toRadians(centerLatitude))
-
-        return points.map { point ->
-            ProjectedTracePoint(
-                xMeters = (point.longitude - centerLongitude) * longitudeMeterScale,
-                yMeters = (point.latitude - centerLatitude) * METERS_PER_DEGREE,
-                distanceMeters = point.distanceMeters
+                repeatLevel = point.repeatLevel
             )
         }
     }
@@ -505,124 +382,15 @@ class RunSummaryImageSaver(private val context: Context) {
         canvas.drawCircle(point.x, point.y, radius * 0.58f, innerPaint)
     }
 
-    private fun readAcceptedTracePoints(traceCsvPath: String?): List<TracePoint> {
-        if (traceCsvPath.isNullOrBlank()) return emptyList()
-        val file = File(traceCsvPath)
-        if (!file.exists()) return emptyList()
-
-        return runCatching {
-            file.bufferedReader().use { reader ->
-                val header = reader.readLine() ?: return@use emptyList<TracePoint>()
-                val columns = parseCsvLine(header)
-                val latitudeIndex = columns.indexOf("latitude")
-                val longitudeIndex = columns.indexOf("longitude")
-                val decisionIndex = columns.indexOf("decision")
-                val totalDistanceIndex = columns.indexOf("total_distance_m")
-                if (latitudeIndex < 0 || longitudeIndex < 0 || decisionIndex < 0) {
-                    return@use emptyList<TracePoint>()
-                }
-
-                val points = reader.lineSequence().mapNotNull { line ->
-                    val values = parseCsvLine(line)
-                    if (values.size <= maxOf(latitudeIndex, longitudeIndex, decisionIndex)) {
-                        return@mapNotNull null
-                    }
-                    if (values[decisionIndex] != "accepted") {
-                        return@mapNotNull null
-                    }
-
-                    val latitude = values[latitudeIndex].toDoubleOrNull()
-                    val longitude = values[longitudeIndex].toDoubleOrNull()
-                    val distanceMeters = if (totalDistanceIndex >= 0 && values.size > totalDistanceIndex) {
-                        values[totalDistanceIndex].toFloatOrNull()
-                    } else {
-                        null
-                    }
-                    if (latitude == null || longitude == null) {
-                        null
-                    } else {
-                        TracePoint(
-                            latitude = latitude,
-                            longitude = longitude,
-                            distanceMeters = distanceMeters ?: 0f
-                        )
-                    }
-                }.toList()
-                normalizeTraceDistances(points)
-            }
-        }.getOrDefault(emptyList())
-    }
-
-    private fun normalizeTraceDistances(points: List<TracePoint>): List<TracePoint> {
-        if (points.isEmpty()) return points
-        val csvDistancesAreUsable = points.last().distanceMeters > 0f &&
-            points.zipWithNext().all { (previous, current) -> current.distanceMeters >= previous.distanceMeters }
-        if (csvDistancesAreUsable) return points
-
-        var cumulativeDistance = 0f
-        var previousPoint = points.first()
-        return points.mapIndexed { index, point ->
-            if (index > 0) {
-                cumulativeDistance += approximateDistanceMeters(previousPoint, point)
-                previousPoint = point
-            }
-            point.copy(distanceMeters = cumulativeDistance)
-        }
-    }
-
-    private fun approximateDistanceMeters(first: TracePoint, second: TracePoint): Float {
-        val averageLatitudeRadians = Math.toRadians((first.latitude + second.latitude) / 2.0)
-        val dx = (second.longitude - first.longitude) * METERS_PER_DEGREE * cos(averageLatitudeRadians)
-        val dy = (second.latitude - first.latitude) * METERS_PER_DEGREE
-        return hypot(dx, dy).toFloat()
-    }
-
-    private fun parseCsvLine(line: String): List<String> {
-        val values = mutableListOf<String>()
-        val current = StringBuilder()
-        var inQuotes = false
-        var index = 0
-        while (index < line.length) {
-            val char = line[index]
-            when {
-                char == '"' && inQuotes && index + 1 < line.length && line[index + 1] == '"' -> {
-                    current.append('"')
-                    index++
-                }
-                char == '"' -> inQuotes = !inQuotes
-                char == ',' && !inQuotes -> {
-                    values.add(current.toString())
-                    current.clear()
-                }
-                else -> current.append(char)
-            }
-            index++
-        }
-        values.add(current.toString())
-        return values
-    }
-
     private fun Int.withAlpha(alpha: Int): Int {
         return (this and 0x00FFFFFF) or (alpha.coerceIn(0, 255) shl 24)
     }
-
-    private data class TracePoint(
-        val latitude: Double,
-        val longitude: Double,
-        val distanceMeters: Float,
-    )
 
     private data class SummaryRow(
         val rect: RectF,
         val label: String,
         val value: String,
         val valueColor: Int,
-    )
-
-    private data class ProjectedTracePoint(
-        val xMeters: Double,
-        val yMeters: Double,
-        val distanceMeters: Float,
     )
 
     private data class ScreenTracePoint(
@@ -644,64 +412,13 @@ class RunSummaryImageSaver(private val context: Context) {
         val toOffset: Float,
     )
 
-    private data class Vector(
-        val x: Double,
-        val y: Double,
-    ) {
-        fun length(): Double = hypot(x, y)
-
-        fun dot(other: Vector): Double = x * other.x + y * other.y
-    }
-
-    private data class GridKey(
-        val x: Int,
-        val y: Int,
-    )
-
     private companion object {
-        private const val METERS_PER_DEGREE = 111_320.0
         private const val MAX_REPEAT_LEVEL = 4
         private const val OFFSET_TRANSITION_METERS = 45f
     }
 
-    private fun saveWithMediaStore(bitmap: Bitmap, fileName: String): String {
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-            put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/RunVoice")
-            put(MediaStore.Images.Media.IS_PENDING, 1)
-        }
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-            ?: return "保存截图失败"
-
-        resolver.openOutputStream(uri)?.use { output ->
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
-        } ?: return "保存截图失败"
-
-        values.clear()
-        values.put(MediaStore.Images.Media.IS_PENDING, 0)
-        resolver.update(uri, values, null, null)
-        return "截图已保存到本地相册"
-    }
-
-    private fun saveToAppStorage(bitmap: Bitmap, fileName: String): String {
-        val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-            ?: File(context.filesDir, "pictures")
-        val dir = File(baseDir, "RunVoice").apply { mkdirs() }
-        val file = File(dir, fileName)
-        FileOutputStream(file).use { output ->
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
-        }
-        return "截图已保存到 ${file.absolutePath}"
-    }
-
     private fun timestampForFile(timeMillis: Long): String {
         return SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(timeMillis))
-    }
-
-    private fun formatFinishedAt(timeMillis: Long): String {
-        return SimpleDateFormat("yyyy年MM月dd日 HH:mm:ss", Locale.getDefault()).format(Date(timeMillis))
     }
 
     private fun formatFinishedAtLines(timeMillis: Long): Pair<String, String> {
@@ -710,11 +427,4 @@ class RunSummaryImageSaver(private val context: Context) {
         return date to time
     }
 
-    private fun averagePaceFormatted(runData: RunData): String {
-        if (runData.distanceMeters <= 0f || runData.elapsedSeconds <= 0L) return "--'--\""
-        val secondsPerKm = ((runData.elapsedSeconds * 1000f) / runData.distanceMeters).toInt()
-        val minutes = secondsPerKm / 60
-        val seconds = secondsPerKm % 60
-        return "%d'%02d\"".format(minutes, seconds)
-    }
 }

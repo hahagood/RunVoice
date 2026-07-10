@@ -61,6 +61,18 @@
 - `ignored / jump_gt_100m`
   与前一点距离跳变过大，被视为异常点丢弃。
 
+- `ignored / speed_above_7_mps`
+  基于定位单调时钟推导的单段速度超过 7 m/s；该点不累计距离，也不会推进有效定位锚点。
+
+- `ignored / speed_below_0_5_mps`
+  非静止锁定状态下推导速度低于 0.5 m/s，按慢速漂移处理，不累计距离。
+
+- `ignored / non_monotonic_location_time`
+  定位样本乱序或单调时间没有前进；该点被拒绝，避免负时间间隔和异常速度。
+
+- `ignored / stationary_resume_distance_above_limit`
+  静止恢复候选位移超过单点安全上限；保持静止锁定并重新确认，避免一次补入无上界距离。
+
 - `ignored / stationary_gps_still`
   加速度计和 GPS 都判断当前基本静止，定位漂移不计入距离。
 

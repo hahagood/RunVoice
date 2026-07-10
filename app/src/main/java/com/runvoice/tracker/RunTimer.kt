@@ -1,10 +1,11 @@
 package com.runvoice.tracker
 
+import android.os.SystemClock
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-class RunTimer {
+class RunTimer(private val nowMillis: () -> Long = SystemClock::elapsedRealtime) {
 
     private val _elapsedSeconds = MutableStateFlow(0L)
     val elapsedSeconds = _elapsedSeconds.asStateFlow()
@@ -15,12 +16,12 @@ class RunTimer {
 
     fun start(scope: CoroutineScope) {
         if (timerJob?.isActive == true) return
-        startTimeMillis = System.currentTimeMillis()
+        startTimeMillis = nowMillis()
         timerJob = scope.launch {
             while (isActive) {
                 delay(1000)
                 _elapsedSeconds.value = accumulated +
-                    (System.currentTimeMillis() - startTimeMillis) / 1000
+                    (nowMillis() - startTimeMillis).coerceAtLeast(0L) / 1000
             }
         }
     }

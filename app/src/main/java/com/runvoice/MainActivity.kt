@@ -30,6 +30,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.runvoice.model.RunData
 import com.runvoice.service.RunningService
+import com.runvoice.tracker.TraceSaveResult
+import com.runvoice.tracker.HeartRateState
 import com.runvoice.ui.*
 import kotlinx.coroutines.flow.MutableStateFlow
 
@@ -37,6 +39,7 @@ class MainActivity : ComponentActivity() {
 
     private var serviceState = mutableStateOf<RunningService?>(null)
     private var permissionsGranted = mutableStateOf(false)
+    private var bindingRequested = false
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -53,8 +56,13 @@ class MainActivity : ComponentActivity() {
         get() = buildList {
             add(Manifest.permission.ACCESS_FINE_LOCATION)
             add(Manifest.permission.ACCESS_COARSE_LOCATION)
-            add(Manifest.permission.BLUETOOTH_SCAN)
-            add(Manifest.permission.BLUETOOTH_CONNECT)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(Manifest.permission.BLUETOOTH_SCAN)
+                add(Manifest.permission.BLUETOOTH_CONNECT)
+            }
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+                add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
             }
@@ -69,6 +77,7 @@ class MainActivity : ComponentActivity() {
     ) { _ ->
         // Only location is mandatory to proceed
         permissionsGranted.value = hasLocationPermission()
+        if (permissionsGranted.value) bindRunningService()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -96,25 +105,19 @@ class MainActivity : ComponentActivity() {
                 return@setContent
             }
 
-            // Bind to service when we have permissions
-            LaunchedEffect(Unit) {
-                val intent = Intent(this@MainActivity, RunningService::class.java)
-                bindService(intent, connection, Context.BIND_AUTO_CREATE)
-            }
-
             // Always collect flows unconditionally — Compose requires stable call structure
             val fallbackRunData = remember { MutableStateFlow(RunData()) }
             val runData by (service?.runData ?: fallbackRunData).collectAsStateWithLifecycle()
 
-            val hrMonitor = service?.heartRateMonitor
             val fallbackBool = remember { MutableStateFlow(false) }
-            val fallbackInt = remember { MutableStateFlow(0) }
             val fallbackDevices = remember { MutableStateFlow(emptyList<com.runvoice.tracker.HeartRateMonitor.BleDevice>()) }
+            val fallbackHrState = remember { MutableStateFlow<HeartRateState>(HeartRateState.Idle) }
 
-            val hrScanning by (hrMonitor?.scanning ?: fallbackBool).collectAsStateWithLifecycle()
-            val hrDevices by (hrMonitor?.discoveredDevices ?: fallbackDevices).collectAsStateWithLifecycle()
-            val hrConnected by (hrMonitor?.connected ?: fallbackBool).collectAsStateWithLifecycle()
-            val savedAddr = hrMonitor?.getSavedDeviceAddress()
+            val hrScanning by (service?.heartRateScanning ?: fallbackBool).collectAsStateWithLifecycle()
+            val hrDevices by (service?.heartRateDevices ?: fallbackDevices).collectAsStateWithLifecycle()
+            val hrState by (service?.heartRateState ?: fallbackHrState).collectAsStateWithLifecycle()
+            val savedAddr = service?.savedHeartRateDeviceAddress()
+            val hrConnected = runData.hrDeviceConnected
 
             val startDest = remember {
                 val prefs = getSharedPreferences("runvoice", MODE_PRIVATE)
@@ -131,15 +134,11 @@ class MainActivity : ComponentActivity() {
                         hrConnected = hrConnected,
                         onSaveAndStop = {
                             service?.stopRun(saveSession = true)
-                            // Re-bind since service stopped itself
-                            val intent = Intent(this@MainActivity, RunningService::class.java)
-                            bindService(intent, connection, Context.BIND_AUTO_CREATE)
+                                ?: TraceSaveResult.Failed("跑步服务未连接，数据尚未保存")
                         },
                         onDiscardAndStop = {
                             service?.stopRun(saveSession = false)
-                            // Re-bind since service stopped itself
-                            val intent = Intent(this@MainActivity, RunningService::class.java)
-                            bindService(intent, connection, Context.BIND_AUTO_CREATE)
+                                ?: TraceSaveResult.Failed("跑步服务未连接，无法结束本次记录")
                         },
                         onOpenHrSettings = { navController.navigate("hr_settings") },
                         onOpenAbout = { navController.navigate("about") },
@@ -162,23 +161,29 @@ class MainActivity : ComponentActivity() {
                 composable("hr_settings") {
                     HrDeviceScreen(
                         state = HrDeviceUiState(
-                            available = hrMonitor != null,
+                            available = service != null && hrState !is HeartRateState.Unavailable &&
+                                hrState !is HeartRateState.PermissionDenied,
                             scanning = hrScanning,
                             devices = hrDevices.map { HrDeviceItem(it.name, it.address, it.rssi) },
                             connectedAddress = if (hrConnected) savedAddr else null,
-                            savedAddress = savedAddr
+                            savedAddress = savedAddr,
+                            statusMessage = when (val state = hrState) {
+                                HeartRateState.PermissionDenied -> "蓝牙权限未授予或已被撤销。请在系统设置中允许蓝牙权限。"
+                                HeartRateState.Unavailable -> "蓝牙当前不可用。请确认设备支持蓝牙并已打开蓝牙开关。"
+                                is HeartRateState.Error -> state.message
+                                else -> null
+                            }
                         ),
-                        onStartScan = { hrMonitor?.startScan() },
-                        onStopScan = { hrMonitor?.stopScan() },
+                        onStartScan = { service?.startHeartRateScan() },
+                        onStopScan = { service?.stopHeartRateScan() },
                         onSelectDevice = { address ->
-                            hrMonitor?.stopScan()
-                            hrMonitor?.saveDevice(address)
-                            hrMonitor?.connectToDevice(address)
+                            service?.stopHeartRateScan()
+                            service?.selectHeartRateDevice(address)
                             navController.popBackStack()
                         },
-                        onDisconnect = { hrMonitor?.clearSavedDevice() },
+                        onDisconnect = { service?.disconnectHeartRateDevice() },
                         onBack = {
-                            hrMonitor?.stopScan()
+                            service?.stopHeartRateScan()
                             navController.popBackStack()
                         }
                     )
@@ -192,8 +197,6 @@ class MainActivity : ComponentActivity() {
             action = RunningService.ACTION_START
         }
         ContextCompat.startForegroundService(this, intent)
-        // Ensure we are bound
-        bindService(Intent(this, RunningService::class.java), connection, Context.BIND_AUTO_CREATE)
     }
 
     private fun sendServiceAction(action: String) {
@@ -203,11 +206,27 @@ class MainActivity : ComponentActivity() {
         startService(intent)
     }
 
-    override fun onDestroy() {
-        if (serviceState.value != null) {
-            unbindService(connection)
+    override fun onStart() {
+        super.onStart()
+        if (hasLocationPermission()) bindRunningService()
+    }
+
+    override fun onStop() {
+        if (bindingRequested) {
+            runCatching { unbindService(connection) }
+            bindingRequested = false
+            serviceState.value = null
         }
-        super.onDestroy()
+        super.onStop()
+    }
+
+    private fun bindRunningService() {
+        if (bindingRequested) return
+        bindingRequested = bindService(
+            Intent(this, RunningService::class.java),
+            connection,
+            Context.BIND_AUTO_CREATE
+        )
     }
 }
 

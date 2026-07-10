@@ -72,12 +72,21 @@ app/src/main/java/com/runvoice/
 │   └── AboutScreen.kt          # 关于/免责声明
 ├── service/
 │   └── RunningService.kt       # 前台服务，整合所有模块
+├── core/
+│   ├── RunSessionController.kt # 纯 Kotlin 跑步会话状态机
+│   ├── TrackingEngine.kt       # 纯 Kotlin GPS 接受/距离/配速决策
+│   └── AnnouncementPolicy.kt  # 公里与阶段配速播报策略
 ├── tracker/
-│   ├── GpsTracker.kt           # GPS 定位 + 距离/配速（含中位数平滑）
+│   ├── GpsTracker.kt           # Android 定位适配器
 │   ├── GpsTraceRecorder.kt     # 跑步时轨迹 CSV 留档
 │   ├── MotionDetector.kt       # 加速度传感器静止检测
 │   ├── HeartRateMonitor.kt     # BLE 心率
 │   └── RunTimer.kt             # 计时器
+├── share/
+│   ├── RunSummaryImageSaver.kt # 跑后摘要 Canvas 渲染
+│   ├── TraceCsvReader.kt       # 轨迹 CSV 解析
+│   ├── TraceGeometry.kt        # 投影与复走识别
+│   └── RunSummaryImageStorage.kt # 图片存储适配器
 ├── voice/
 │   ├── VoiceAnnouncer.kt       # TTS 语音播报 + 短提示音预热
 │   └── Metronome.kt            # 步频节拍器（AudioTrack PCM）
@@ -110,7 +119,7 @@ Release APK：
 ./gradlew assembleRelease
 ```
 
-输出路径：`app/build/outputs/apk/release/app-release.apk`
+未签名输出路径：`app/build/outputs/apk/release/app-release-unsigned.apk`
 
 ## 安装
 
@@ -179,6 +188,16 @@ adb pull /sdcard/Android/data/com.runvoice/files/gps-traces ./gps-traces
 - 已实现：保存数据时将 GPS 轨迹 CSV 复制到公共 Documents 目录，降低 App 重装导致原始轨迹丢失的风险
 - 已实现：结束摘要截图保存到本地图片目录
 - 尚未实现：单次跑步摘要历史、历史列表、周/月汇总页
+
+隐私提醒：GPS CSV 包含精确路线、时间、速度、海拔和心率。公共导出位于
+`Documents/RunVoice/gps-traces`，卸载 App 不会自动删除；分享或提交文件前请先脱敏，
+不再需要时请通过系统文件管理器手动删除。
+
+## 会话恢复策略
+
+当前版本在系统终止进程后不会尝试用空白内存状态“恢复”跑步，也不会自动重启前台服务。
+重新打开 App 时会明确回到“准备开始”状态。后续只有在实现完整 checkpoint 持久化和恢复校验后，
+才会重新启用进程重建后的会话续跑。
 
 ## 要求
 
