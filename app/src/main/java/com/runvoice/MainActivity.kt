@@ -144,7 +144,8 @@ class MainActivity : ComponentActivity() {
                         onOpenHrSettings = { navController.navigate("hr_settings") },
                         onOpenAbout = { navController.navigate("about") },
                         onToggleMetronome = { service?.toggleMetronome() },
-                        onBpmChange = { bpm -> service?.setMetronomeBpm(bpm) }
+                        onBpmChange = { bpm -> service?.setMetronomeBpm(bpm) },
+                        currentTracePathForSnapshot = { service?.currentTracePathForSnapshot() }
                     )
                 }
                 composable("about") {

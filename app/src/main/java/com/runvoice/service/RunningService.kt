@@ -81,13 +81,17 @@ class RunningService : Service() {
         motionDetector = MotionDetector(this)
         gpsTracker = GpsTracker(this, motionDetector)
         heartRateMonitor = HeartRateMonitor(this)
+        gpsTracker.setHeartRateProviders(
+            heartRateProvider = { heartRateMonitor.heartRate.value },
+            hrConnectedProvider = { heartRateMonitor.connected.value }
+        )
         runTimer = RunTimer()
         voiceAnnouncer = VoiceAnnouncer(this)
         metronome = Metronome()
         // Restore saved metronome BPM and auto-start if was active
         metronome.setBpm(prefs.getInt("metronome_bpm", 180))
         if (prefs.getBoolean("metronome_active", false)) {
-            metronome.start(serviceScope)
+            metronome.start()
         }
         // Auto-connect saved HR device on service creation
         heartRateMonitor.connectSavedDevice()
@@ -374,6 +378,14 @@ class RunningService : Service() {
                     val event = extractMediaKeyEvent(mediaButtonIntent) ?: return false
                     return handleMediaButtonEvent(event)
                 }
+
+                override fun onPlay() {
+                    handleTransportControl()
+                }
+
+                override fun onPause() {
+                    handleTransportControl()
+                }
             })
             isActive = false
         }
@@ -462,7 +474,6 @@ class RunningService : Service() {
     }
 
     private fun handleMediaButtonEvent(event: KeyEvent): Boolean {
-        if (event.action != KeyEvent.ACTION_UP || event.repeatCount != 0) return false
         if (!_runData.value.isRunning) return false
 
         when (event.keyCode) {
@@ -470,6 +481,9 @@ class RunningService : Service() {
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
             KeyEvent.KEYCODE_MEDIA_PLAY,
             KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                if (event.action != KeyEvent.ACTION_UP || event.repeatCount != 0) {
+                    return true
+                }
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastMediaButtonHandledAt < 400L) return true
                 lastMediaButtonHandledAt = now
@@ -478,6 +492,14 @@ class RunningService : Service() {
             }
         }
         return false
+    }
+
+    private fun handleTransportControl() {
+        if (!_runData.value.isRunning) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastMediaButtonHandledAt < 400L) return
+        lastMediaButtonHandledAt = now
+        announceCurrentStats()
     }
 
     private fun buildNotification(text: String): Notification {
@@ -501,13 +523,18 @@ class RunningService : Service() {
     }
 
     fun toggleMetronome() {
-        metronome.toggle(serviceScope)
+        metronome.toggle()
         prefs.edit().putBoolean("metronome_active", metronome.isPlaying.value).apply()
     }
 
     fun setMetronomeBpm(bpm: Int) {
         metronome.setBpm(bpm)
         prefs.edit().putInt("metronome_bpm", metronome.bpm.value).apply()
+    }
+
+    fun currentTracePathForSnapshot(): String? {
+        gpsTracker.flushTrace()
+        return gpsTracker.currentTracePath()
     }
 
     override fun onDestroy() {

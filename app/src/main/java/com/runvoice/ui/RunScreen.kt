@@ -65,6 +65,7 @@ fun RunScreen(
     onOpenAbout: () -> Unit = {},
     onToggleMetronome: () -> Unit = {},
     onBpmChange: (Int) -> Unit = {},
+    currentTracePathForSnapshot: () -> String? = { null },
     hrConnected: Boolean = false
 ) {
     val context = LocalContext.current
@@ -73,6 +74,7 @@ fun RunScreen(
     var showStopConfirm by remember { mutableStateOf(false) }
     var stopConfirmAtMillis by remember { mutableStateOf(0L) }
     var stopSummaryRunData by remember { mutableStateOf<RunData?>(null) }
+    var stopTraceCsvPath by remember { mutableStateOf<String?>(null) }
     var runDataSaved by remember { mutableStateOf(false) }
 
     if (showStopConfirm) {
@@ -91,6 +93,7 @@ fun RunScreen(
                 val wasSaved = runDataSaved
                 showStopConfirm = false
                 stopSummaryRunData = null
+                stopTraceCsvPath = null
                 runDataSaved = false
                 stopConfirmAtMillis = 0L
                 if (!wasSaved) {
@@ -98,9 +101,10 @@ fun RunScreen(
                 }
             },
             onSaveSnapshot = { finishedAtMillis ->
+                val traceCsvPath = stopTraceCsvPath ?: currentTracePathForSnapshot()
                 scope.launch {
                     val message = withContext(Dispatchers.IO) {
-                        imageSaver.saveSummary(stopSummaryRunData ?: runData, finishedAtMillis)
+                        imageSaver.saveSummary(stopSummaryRunData ?: runData, finishedAtMillis, traceCsvPath)
                     }
                     Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                 }
@@ -196,6 +200,7 @@ fun RunScreen(
                         onClick = {
                             stopConfirmAtMillis = System.currentTimeMillis()
                             stopSummaryRunData = runData
+                            stopTraceCsvPath = currentTracePathForSnapshot()
                             runDataSaved = false
                             showStopConfirm = true
                         },
@@ -554,7 +559,9 @@ private fun MetricCard(
                 text = value,
                 color = valueColor,
                 fontSize = 34.sp,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Clip
             )
             if (unit.isNotEmpty()) {
                 Text(

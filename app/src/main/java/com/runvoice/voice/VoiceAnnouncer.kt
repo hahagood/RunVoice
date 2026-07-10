@@ -3,6 +3,7 @@ package com.runvoice.voice
 import android.content.Context
 import android.media.AudioManager
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.ToneGenerator
 import android.os.Bundle
 import android.os.Handler
@@ -25,6 +26,18 @@ class VoiceAnnouncer(context: Context) {
     private val pendingUtterances = ArrayDeque<Pair<String, String>>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingSpeakRunnable: Runnable? = null
+    private val audioManager = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val speechAudioAttributes = AudioAttributes.Builder()
+        // Accessibility stream was silent on some OEM builds.
+        // Route spoken workout prompts through the normal media path instead.
+        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .setLegacyStreamType(AudioManager.STREAM_MUSIC)
+        .build()
+    private val audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+        .setAudioAttributes(speechAudioAttributes)
+        .setAcceptsDelayedFocusGain(false)
+        .build()
     private val toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 35)
     private val speakParams = Bundle().apply {
         putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
@@ -72,6 +85,7 @@ class VoiceAnnouncer(context: Context) {
         pendingSpeakRunnable?.let(mainHandler::removeCallbacks)
         pendingSpeakRunnable = null
         toneGenerator.release()
+        audioManager.abandonAudioFocusRequest(audioFocusRequest)
         tts?.stop()
         tts?.shutdown()
         tts = null
@@ -82,21 +96,21 @@ class VoiceAnnouncer(context: Context) {
     private fun configureTts() {
         val engine = tts ?: return
 
-        engine.setAudioAttributes(
-            AudioAttributes.Builder()
-                // Accessibility stream was silent on some OEM builds.
-                // Route spoken workout prompts through the normal media path instead.
-                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .setLegacyStreamType(AudioManager.STREAM_MUSIC)
-                .build()
-        )
+        engine.setAudioAttributes(speechAudioAttributes)
 
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) = Unit
-            override fun onDone(utteranceId: String?) = Unit
+            override fun onStart(utteranceId: String?) {
+                Log.d(TAG, "TTS utterance started: $utteranceId")
+            }
+
+            override fun onDone(utteranceId: String?) {
+                Log.d(TAG, "TTS utterance done: $utteranceId")
+                audioManager.abandonAudioFocusRequest(audioFocusRequest)
+            }
+
             override fun onError(utteranceId: String?) {
                 Log.w(TAG, "TTS utterance failed: $utteranceId")
+                audioManager.abandonAudioFocusRequest(audioFocusRequest)
             }
         })
 
@@ -142,12 +156,21 @@ class VoiceAnnouncer(context: Context) {
             val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, speakParams, utteranceId)
             if (result != TextToSpeech.SUCCESS) {
                 Log.w(TAG, "TTS speak failed for $utteranceId result=$result")
+                audioManager.abandonAudioFocusRequest(audioFocusRequest)
             }
         }
 
+        requestSpeechAudioFocus(utteranceId)
         toneGenerator.startTone(ToneGenerator.TONE_PROP_BEEP2, PREWARM_TONE_MS)
         pendingSpeakRunnable = speakAction
         mainHandler.postDelayed(speakAction, PREWARM_DELAY_MS)
+    }
+
+    private fun requestSpeechAudioFocus(utteranceId: String) {
+        val focusResult = audioManager.requestAudioFocus(audioFocusRequest)
+        if (focusResult != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            Log.w(TAG, "Audio focus request failed result=$focusResult for $utteranceId")
+        }
     }
 
     private fun flushPendingUtterances() {

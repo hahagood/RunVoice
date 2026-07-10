@@ -19,7 +19,7 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
         private const val GPS_CONFIRMATION_DISPLACEMENT_M = 25f
         private const val GPS_CONFIRMATION_DURATION_MS = 15_000L
         private const val GPS_CONFIRMATION_MIN_SPEED_MPS = 0.5f
-        private const val GPS_CONFIRMATION_MAX_SPEED_MPS = 5.5f
+        private const val GPS_CONFIRMATION_MAX_SPEED_MPS = 15f // allow smooth bicycle coasting during field tests
         private const val GPS_CONFIRMATION_SPEED_WINDOW_SIZE = 5
         private const val GPS_CONFIRMATION_MIN_STABLE_SPEED_SAMPLES = 4
         private const val GPS_CONFIRMATION_MAX_SPEED_SPREAD_MPS = 2.5f
@@ -29,6 +29,8 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
 
     private val fusedClient = LocationServices.getFusedLocationProviderClient(context)
     private val traceRecorder = GpsTraceRecorder(context)
+    private var heartRateProvider: () -> Int = { 0 }
+    private var hrConnectedProvider: () -> Boolean = { false }
 
     private val _distanceMeters = MutableStateFlow(0f)
     val distanceMeters = _distanceMeters.asStateFlow()
@@ -53,6 +55,7 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
     private var pendingStationaryDistance = 0f
     private var pendingStationaryStartTime = 0L
     private var pendingStationaryStartLocation: Location? = null
+    private var stationaryAnchorLocation: Location? = null
     private val pendingStationarySpeeds = ArrayDeque<Float>(GPS_CONFIRMATION_SPEED_WINDOW_SIZE)
 
     private val locationRequest = LocationRequest.Builder(
@@ -71,7 +74,9 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
                         deltaMeters = 0f,
                         totalDistanceMeters = totalDistance,
                         segmentDistanceMeters = segmentDistance,
-                        paceSecondsPerKm = _paceSecondsPerKm.value
+                        paceSecondsPerKm = _paceSecondsPerKm.value,
+                        heartRate = heartRateProvider(),
+                        hrConnected = hrConnectedProvider()
                     )
                     return@forEach
                 }
@@ -86,7 +91,7 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
 
         if (prev == null) {
             segmentStartTime = loc.time
-            resetStationaryGpsConfirmation()
+            clearStationaryLock()
             _stationaryDetected.value = false
             traceRecorder.record(
                 location = loc,
@@ -96,7 +101,9 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
                 deltaMeters = 0f,
                 totalDistanceMeters = totalDistance,
                 segmentDistanceMeters = segmentDistance,
-                paceSecondsPerKm = _paceSecondsPerKm.value
+                paceSecondsPerKm = _paceSecondsPerKm.value,
+                heartRate = heartRateProvider(),
+                hrConnected = hrConnectedProvider()
             )
             return
         }
@@ -104,7 +111,7 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
         val d = prev.distanceTo(loc)
         // Ignore unreasonably large jumps (> 100m in ~2-3s = >120 km/h)
         if (d > 100f) {
-            resetStationaryGpsConfirmation()
+            clearStationaryLock()
             _stationaryDetected.value = false
             traceRecorder.record(
                 location = loc,
@@ -114,7 +121,9 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
                 deltaMeters = d,
                 totalDistanceMeters = totalDistance,
                 segmentDistanceMeters = segmentDistance,
-                paceSecondsPerKm = _paceSecondsPerKm.value
+                paceSecondsPerKm = _paceSecondsPerKm.value,
+                heartRate = heartRateProvider(),
+                hrConnected = hrConnectedProvider()
             )
             return
         }
@@ -127,7 +136,14 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
         var acceptedReason = "distance_accumulated"
 
         if (motionState == false || wasStationary) {
+            if (!gpsMovementOverride && stationaryAnchorLocation == null) {
+                stationaryAnchorLocation = Location(prev)
+            }
+
             if (!gpsIndicatesMovement) {
+                if (stationaryAnchorLocation == null) {
+                    stationaryAnchorLocation = Location(prev)
+                }
                 resetStationaryGpsConfirmation()
                 _stationaryDetected.value = true
                 traceRecorder.record(
@@ -142,7 +158,9 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
                     deltaMeters = d,
                     totalDistanceMeters = totalDistance,
                     segmentDistanceMeters = segmentDistance,
-                    paceSecondsPerKm = _paceSecondsPerKm.value
+                    paceSecondsPerKm = _paceSecondsPerKm.value,
+                    heartRate = heartRateProvider(),
+                    hrConnected = hrConnectedProvider()
                 )
                 return
             }
@@ -164,7 +182,9 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
                         deltaMeters = d,
                         totalDistanceMeters = totalDistance,
                         segmentDistanceMeters = segmentDistance,
-                        paceSecondsPerKm = _paceSecondsPerKm.value
+                        paceSecondsPerKm = _paceSecondsPerKm.value,
+                        heartRate = heartRateProvider(),
+                        hrConnected = hrConnectedProvider()
                     )
                     return
                 }
@@ -203,22 +223,23 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
                         deltaMeters = d,
                         totalDistanceMeters = totalDistance,
                         segmentDistanceMeters = segmentDistance,
-                        paceSecondsPerKm = _paceSecondsPerKm.value
+                        paceSecondsPerKm = _paceSecondsPerKm.value,
+                        heartRate = heartRateProvider(),
+                        hrConnected = hrConnectedProvider()
                     )
                     return
                 }
 
                 gpsMovementOverride = true
                 _stationaryDetected.value = false
-                distanceToAdd = pendingStationaryDistance
-                pendingStationaryDistance = 0f
-                pendingStationaryStartTime = 0L
-                pendingStationaryStartLocation = null
+                distanceToAdd = stationaryAnchorLocation?.distanceTo(loc) ?: pendingStationaryDistance
+                clearPendingStationaryMovement()
+                stationaryAnchorLocation = null
             }
             acceptedReason = "gps_confirmed_movement"
         } else {
             _stationaryDetected.value = false
-            resetStationaryGpsConfirmation()
+            clearStationaryLock()
         }
 
         totalDistance += distanceToAdd
@@ -250,16 +271,27 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
             deltaMeters = distanceToAdd,
             totalDistanceMeters = totalDistance,
             segmentDistanceMeters = segmentDistance,
-            paceSecondsPerKm = _paceSecondsPerKm.value
+            paceSecondsPerKm = _paceSecondsPerKm.value,
+            heartRate = heartRateProvider(),
+            hrConnected = hrConnectedProvider()
         )
     }
 
     private fun resetStationaryGpsConfirmation() {
         gpsMovementOverride = false
+        clearPendingStationaryMovement()
+    }
+
+    private fun clearPendingStationaryMovement() {
         pendingStationaryDistance = 0f
         pendingStationaryStartTime = 0L
         pendingStationaryStartLocation = null
         pendingStationarySpeeds.clear()
+    }
+
+    private fun clearStationaryLock() {
+        resetStationaryGpsConfirmation()
+        stationaryAnchorLocation = null
     }
 
     private fun segmentSpeedMetersPerSecond(prev: Location, loc: Location, distanceMeters: Float): Float? {
@@ -306,7 +338,7 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
         segmentDistance = 0f
         segmentStartTime = 0L
         paceBuffer.clear()
-        resetStationaryGpsConfirmation()
+        clearStationaryLock()
         _distanceMeters.value = 0f
         _paceSecondsPerKm.value = 0
         _stationaryDetected.value = false
@@ -323,7 +355,7 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
         segmentDistance = 0f
         segmentStartTime = 0L
         lastLocation = null
-        resetStationaryGpsConfirmation()
+        clearStationaryLock()
         _stationaryDetected.value = false
         fusedClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
     }
@@ -331,10 +363,22 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
     fun stop(saveSession: Boolean = true) {
         fusedClient.removeLocationUpdates(locationCallback)
         lastLocation = null
-        resetStationaryGpsConfirmation()
+        clearStationaryLock()
         _stationaryDetected.value = false
         traceRecorder.closeSession(save = saveSession)
     }
 
+    fun flushTrace() {
+        traceRecorder.flush()
+    }
+
     fun currentTracePath(): String? = traceRecorder.currentPath()
+
+    fun setHeartRateProviders(
+        heartRateProvider: () -> Int,
+        hrConnectedProvider: () -> Boolean
+    ) {
+        this.heartRateProvider = heartRateProvider
+        this.hrConnectedProvider = hrConnectedProvider
+    }
 }

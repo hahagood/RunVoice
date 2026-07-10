@@ -13,3 +13,9 @@
 *.class
 *.log
 /app/build
+
+# Local GPS traces contain precise route and health data.
+/gps-traces/
+
+# Local hand-off notes and generated previews are disposable.
+/tmp/

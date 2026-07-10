@@ -81,7 +81,7 @@ class Metronome {
             .build()
     }
 
-    fun start(@Suppress("UNUSED_PARAMETER") scope: kotlinx.coroutines.CoroutineScope) {
+    fun start() {
         if (_isPlaying.value) return
         _isPlaying.value = true
         stopRequested = false
@@ -124,8 +124,8 @@ class Metronome {
         _isPlaying.value = false
     }
 
-    fun toggle(scope: kotlinx.coroutines.CoroutineScope) {
-        if (_isPlaying.value) stop() else start(scope)
+    fun toggle() {
+        if (_isPlaying.value) stop() else start()
     }
 
     fun setBpm(value: Int) {

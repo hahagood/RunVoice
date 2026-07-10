@@ -6,9 +6,15 @@
 
 ## 文件位置
 
-每次开始跑步时，应用会新建一份轨迹文件，保存到应用外部专属目录:
+每次开始跑步时，应用会先新建一份轨迹文件，保存到应用外部专属目录:
 
 `Android/data/com.runvoice/files/gps-traces/`
+
+结束时选择 **保存数据** 后，应用会再复制一份到公共 Documents 目录:
+
+`Documents/RunVoice/gps-traces/`
+
+公共 Documents 目录不随 App 卸载或重装清除，适合作为长期留档和后续导出位置。App 专属目录仍作为本次跑步和结束页截图生成时的工作目录。
 
 文件名示例:
 
@@ -33,6 +39,10 @@
 - `total_distance_m`
 - `segment_distance_m`
 - `pace_sec_per_km`
+- `heart_rate`
+- `hr_connected`
+
+其中 `heart_rate` 和 `hr_connected` 记录该定位点写入时的实时心率值和心率带连接状态，可用于复盘心率数据是否中途丢失。
 
 ## decision / reason 含义
 
@@ -43,7 +53,7 @@
   该点被用于累计距离。
 
 - `accepted / gps_confirmed_movement`
-  加速度计判断静止，但 GPS 已经持续显示真实移动，因此该点仍被用于累计距离。
+  加速度计判断静止，但 GPS 已经持续显示真实移动。恢复确认后，从进入静止锁定时的锚点到当前点补回一段直线位移，避免恢复确认期间漏计里程。
 
 - `ignored / accuracy_gt_20m`
   精度太差，被丢弃。
@@ -61,7 +71,13 @@
 
 ## 导出示例
 
-用 adb 导出整个目录:
+优先从公共 Documents 目录导出:
+
+```bash
+adb pull /sdcard/Documents/RunVoice/gps-traces ./gps-traces
+```
+
+也可以导出 App 专属工作目录:
 
 ```bash
 adb pull /sdcard/Android/data/com.runvoice/files/gps-traces ./gps-traces
