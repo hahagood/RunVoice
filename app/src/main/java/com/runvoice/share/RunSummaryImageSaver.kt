@@ -12,7 +12,6 @@ import com.runvoice.model.RunData
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.hypot
 
 class RunSummaryImageSaver(private val context: Context) {
     private val traceReader = TraceCsvReader()
@@ -70,8 +69,7 @@ class RunSummaryImageSaver(private val context: Context) {
             accentYellow = accentYellow,
             accentRed = accentRed,
             textSecondary = textSecondary,
-            textMuted = textMuted,
-            textPrimary = textPrimary
+            textMuted = textMuted
         )
 
         return bitmap
@@ -87,7 +85,6 @@ class RunSummaryImageSaver(private val context: Context) {
         accentRed: Int,
         textSecondary: Int,
         textMuted: Int,
-        textPrimary: Int,
     ) {
         val width = canvas.width
         val scale = width / 1080f
@@ -125,17 +122,17 @@ class RunSummaryImageSaver(private val context: Context) {
         )
 
         rows.forEach { drawSummaryRowBackground(canvas, it.rect, bgColor) }
+        rows.forEach { drawSummaryRowText(canvas, it, textSecondary) }
         if (tracePoints.size >= 2) {
             drawTraceOverlay(
                 canvas = canvas,
                 tracePoints = tracePoints,
                 routeRect = RectF(card.left + px(180f), card.top + px(96f), card.right - px(180f), card.bottom - px(96f)),
-                startColor = 0xFF516B83.toInt(),
-                finishColor = 0xFF6C5F86.toInt(),
-                endpointInnerColor = textPrimary
+                startColor = 0xFF27704A.toInt(),
+                finishColor = 0xFF71499E.toInt(),
+                endpointInnerColor = 0xFF252832.toInt()
             )
         }
-        rows.forEach { drawSummaryRowText(canvas, it, textSecondary) }
     }
 
     private fun drawSummaryRowBackground(
@@ -189,7 +186,7 @@ class RunSummaryImageSaver(private val context: Context) {
         fun px(value: Float) = value * scale
 
         val screenPoints = projectTracePointsWithRepeatLevels(tracePoints, routeRect) ?: return
-        val visualOffsets = smoothedRouteOffsets(screenPoints)
+        val visualLevels = smoothedLayerLevels(screenPoints)
         var startIndex = 0
         while (startIndex < screenPoints.lastIndex) {
             val level = screenPoints[startIndex + 1].repeatLevel
@@ -199,26 +196,35 @@ class RunSummaryImageSaver(private val context: Context) {
             }
 
             val routeStyle = routeStyleForRepeatLevel(level)
-            val segmentPath = Path().apply {
-                val startPoint = offsetScreenPoint(screenPoints, startIndex, visualOffsets[startIndex])
-                moveTo(startPoint.x, startPoint.y)
-                for (index in (startIndex + 1)..endIndex) {
-                    val point = offsetScreenPoint(screenPoints, index, visualOffsets[index])
-                    lineTo(point.x, point.y)
-                }
-            }
+            val segmentPath = buildLayerPath(screenPoints, visualLevels, startIndex, endIndex)
+            val depth = px(3f + level.coerceAtMost(MAX_REPEAT_LEVEL) * 2.2f)
+            val extrusionPath = buildLayerPath(
+                screenPoints,
+                visualLevels,
+                startIndex,
+                endIndex,
+                shiftX = -depth * 0.46f,
+                shiftY = depth
+            )
             val routeColor = routeStyle.color
-            val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = 0x24000000
+            val extrusionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = routeStyle.edgeColor
                 style = Paint.Style.STROKE
-                strokeWidth = px(routeStyle.strokeWidth + 4f)
+                strokeWidth = px(routeStyle.strokeWidth + 5.5f)
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+            }
+            val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = 0x55000000
+                style = Paint.Style.STROKE
+                strokeWidth = px(routeStyle.strokeWidth + 8f)
                 strokeCap = Paint.Cap.ROUND
                 strokeJoin = Paint.Join.ROUND
             }
             val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = routeColor.withAlpha(routeStyle.glowAlpha)
                 style = Paint.Style.STROKE
-                strokeWidth = px(routeStyle.strokeWidth + 3.5f)
+                strokeWidth = px(routeStyle.strokeWidth + 5f)
                 strokeCap = Paint.Cap.ROUND
                 strokeJoin = Paint.Join.ROUND
             }
@@ -229,47 +235,49 @@ class RunSummaryImageSaver(private val context: Context) {
                 strokeCap = Paint.Cap.ROUND
                 strokeJoin = Paint.Join.ROUND
             }
-            canvas.drawPath(segmentPath, shadowPaint)
+            val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = routeStyle.highlightColor.withAlpha(150)
+                style = Paint.Style.STROKE
+                strokeWidth = px(1.35f)
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+            }
+            canvas.drawPath(extrusionPath, shadowPaint)
+            canvas.drawPath(extrusionPath, extrusionPaint)
             canvas.drawPath(segmentPath, glowPaint)
             canvas.drawPath(segmentPath, routePaint)
+            canvas.drawPath(segmentPath, highlightPaint)
 
             startIndex = endIndex
         }
 
         drawTraceEndpoint(canvas, screenPoints.first().point, startColor.withAlpha(170), endpointInnerColor.withAlpha(150), px(7f), filled = true)
-        drawTraceEndpoint(canvas, screenPoints.last().point, finishColor.withAlpha(170), endpointInnerColor.withAlpha(150), px(7f), filled = false)
+        val finishPoint = stackedScreenPoint(screenPoints.last().point, visualLevels.last())
+        drawTraceEndpoint(canvas, finishPoint, finishColor.withAlpha(210), endpointInnerColor.withAlpha(190), px(7f), filled = false)
     }
 
     private fun routeStyleForRepeatLevel(repeatLevel: Int): RouteStyle {
         return when (repeatLevel.coerceIn(0, MAX_REPEAT_LEVEL)) {
-            0 -> RouteStyle(color = 0xD02F7285.toInt(), strokeWidth = 4.5f, glowAlpha = 34, offsetPx = 0f)
-            1 -> RouteStyle(color = 0xD84B91A4.toInt(), strokeWidth = 4f, glowAlpha = 46, offsetPx = 6f)
-            2 -> RouteStyle(color = 0xE064AAB8.toInt(), strokeWidth = 4f, glowAlpha = 58, offsetPx = -6f)
-            3 -> RouteStyle(color = 0xE47FC0CA.toInt(), strokeWidth = 3.6f, glowAlpha = 68, offsetPx = 10f)
-            else -> RouteStyle(color = 0xE8A3D5DA.toInt(), strokeWidth = 3.6f, glowAlpha = 78, offsetPx = -10f)
+            0 -> RouteStyle(0xFF42C77A.toInt(), 0xFF1F6B45.toInt(), 0xFFA6E8BD.toInt(), 6.4f, 62)
+            1 -> RouteStyle(0xFFA875F5.toInt(), 0xFF5B3D91.toInt(), 0xFFD3B7FF.toInt(), 6.2f, 72)
+            2 -> RouteStyle(0xFFF58C4A.toInt(), 0xFF854725.toInt(), 0xFFFFC09A.toInt(), 6.2f, 78)
+            3 -> RouteStyle(0xFFD96BC5.toInt(), 0xFF78386F.toInt(), 0xFFF0AFE4.toInt(), 6.1f, 82)
+            4 -> RouteStyle(0xFF82C653.toInt(), 0xFF466D2B.toInt(), 0xFFBDE49C.toInt(), 6f, 86)
+            5 -> RouteStyle(0xFFC48655.toInt(), 0xFF70472C.toInt(), 0xFFE2B995.toInt(), 6f, 88)
+            else -> RouteStyle(0xFF55C9A5.toInt(), 0xFF2B705C.toInt(), 0xFFA1E4CF.toInt(), 6f, 90)
         }
     }
 
-    private fun smoothedRouteOffsets(points: List<ScreenTracePoint>): FloatArray {
+    private fun smoothedLayerLevels(points: List<ScreenTracePoint>): FloatArray {
         if (points.isEmpty()) return FloatArray(0)
 
-        val nominalOffsets = points.map { routeStyleForRepeatLevel(it.repeatLevel).offsetPx }
-        val offsets = nominalOffsets.toFloatArray()
+        val nominalLevels = points.map { it.repeatLevel.toFloat() }
+        val levels = nominalLevels.toFloatArray()
         val boundaries = mutableListOf<OffsetBoundary>()
 
-        if (nominalOffsets.first() != 0f) {
-            boundaries.add(
-                OffsetBoundary(
-                    distanceMeters = points.first().distanceMeters,
-                    fromOffset = 0f,
-                    toOffset = nominalOffsets.first()
-                )
-            )
-        }
-
         for (index in 0 until points.lastIndex) {
-            val fromOffset = nominalOffsets[index]
-            val toOffset = nominalOffsets[index + 1]
+            val fromOffset = nominalLevels[index]
+            val toOffset = nominalLevels[index + 1]
             if (fromOffset != toOffset) {
                 boundaries.add(
                     OffsetBoundary(
@@ -281,17 +289,7 @@ class RunSummaryImageSaver(private val context: Context) {
             }
         }
 
-        if (nominalOffsets.last() != 0f) {
-            boundaries.add(
-                OffsetBoundary(
-                    distanceMeters = points.last().distanceMeters,
-                    fromOffset = nominalOffsets.last(),
-                    toOffset = 0f
-                )
-            )
-        }
-
-        if (boundaries.isEmpty()) return offsets
+        if (boundaries.isEmpty()) return levels
 
         points.forEachIndexed { index, point ->
             val nearestBoundary = boundaries.minByOrNull { boundary ->
@@ -301,36 +299,34 @@ class RunSummaryImageSaver(private val context: Context) {
             if (distanceFromBoundary <= OFFSET_TRANSITION_METERS) {
                 val progress = ((point.distanceMeters - nearestBoundary.distanceMeters + OFFSET_TRANSITION_METERS) /
                     (OFFSET_TRANSITION_METERS * 2f)).coerceIn(0f, 1f)
-                offsets[index] = nearestBoundary.fromOffset +
+                levels[index] = nearestBoundary.fromOffset +
                     (nearestBoundary.toOffset - nearestBoundary.fromOffset) * progress
             }
         }
 
-        return offsets
+        return levels
     }
 
-    private fun offsetScreenPoint(
+    private fun buildLayerPath(
         points: List<ScreenTracePoint>,
-        index: Int,
-        offsetPx: Float,
-    ): PointF {
-        if (offsetPx == 0f || points.size < 2) return points[index].point
+        visualLevels: FloatArray,
+        startIndex: Int,
+        endIndex: Int,
+        shiftX: Float = 0f,
+        shiftY: Float = 0f,
+    ): Path = Path().apply {
+        val start = stackedScreenPoint(points[startIndex].point, visualLevels[startIndex])
+        moveTo(start.x + shiftX, start.y + shiftY)
+        for (index in (startIndex + 1)..endIndex) {
+            val point = stackedScreenPoint(points[index].point, visualLevels[index])
+            lineTo(point.x + shiftX, point.y + shiftY)
+        }
+    }
 
-        val startIndex = (index - 1).coerceAtLeast(0)
-        val endIndex = (index + 1).coerceAtMost(points.lastIndex)
-        val start = points[startIndex].point
-        val end = points[endIndex].point
-        val dx = end.x - start.x
-        val dy = end.y - start.y
-        val length = hypot(dx.toDouble(), dy.toDouble()).toFloat()
-        if (length <= 0.001f) return points[index].point
-
-        val normalX = -dy / length
-        val normalY = dx / length
-        val point = points[index].point
+    private fun stackedScreenPoint(point: PointF, visualLevel: Float): PointF {
         return PointF(
-            point.x + normalX * offsetPx,
-            point.y + normalY * offsetPx
+            point.x + visualLevel * STACK_SHIFT_X_PX,
+            point.y - visualLevel * STACK_SHIFT_Y_PX
         )
     }
 
@@ -401,9 +397,10 @@ class RunSummaryImageSaver(private val context: Context) {
 
     private data class RouteStyle(
         val color: Int,
+        val edgeColor: Int,
+        val highlightColor: Int,
         val strokeWidth: Float,
         val glowAlpha: Int,
-        val offsetPx: Float,
     )
 
     private data class OffsetBoundary(
@@ -413,8 +410,10 @@ class RunSummaryImageSaver(private val context: Context) {
     )
 
     private companion object {
-        private const val MAX_REPEAT_LEVEL = 4
-        private const val OFFSET_TRANSITION_METERS = 45f
+        private const val MAX_REPEAT_LEVEL = 6
+        private const val OFFSET_TRANSITION_METERS = 35f
+        private const val STACK_SHIFT_X_PX = 7f
+        private const val STACK_SHIFT_Y_PX = 11f
     }
 
     private fun timestampForFile(timeMillis: Long): String {

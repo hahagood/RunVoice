@@ -10,16 +10,22 @@ import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.runvoice.core.LocationSample
+import com.runvoice.core.LapCompletion
+import com.runvoice.core.LapDetector
+import com.runvoice.core.TrackingAlert
 import com.runvoice.core.TrackingDisposition
 import com.runvoice.core.TrackingEngine
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 
 /** Android location adapter; all acceptance, distance and pace rules live in [TrackingEngine]. */
 class GpsTracker(context: Context, private val motionDetector: MotionDetector? = null) {
     private val fusedClient = LocationServices.getFusedLocationProviderClient(context)
     private val traceRecorder = GpsTraceRecorder(context)
     private val engine = TrackingEngine()
+    private val lapDetector = LapDetector()
     private var heartRateProvider: () -> Int = { 0 }
     private var hrConnectedProvider: () -> Boolean = { false }
 
@@ -31,6 +37,12 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
 
     private val _stationaryDetected = MutableStateFlow(false)
     val stationaryDetected = _stationaryDetected.asStateFlow()
+
+    private val _trackingAlerts = MutableSharedFlow<TrackingAlert>(extraBufferCapacity = 4)
+    val trackingAlerts = _trackingAlerts.asSharedFlow()
+
+    private val _lapCompletions = MutableSharedFlow<LapCompletion>(extraBufferCapacity = 4)
+    val lapCompletions = _lapCompletions.asSharedFlow()
 
     private val locationRequest = LocationRequest.Builder(
         Priority.PRIORITY_HIGH_ACCURACY,
@@ -59,6 +71,14 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
         _distanceMeters.value = decision.totalDistanceMeters
         _paceSecondsPerKm.value = decision.paceSecondsPerKm
         _stationaryDetected.value = decision.stationaryDetected
+        decision.alert?.let(_trackingAlerts::tryEmit)
+        if (decision.disposition == TrackingDisposition.Accepted) {
+            lapDetector.process(
+                latitude = location.latitude,
+                longitude = location.longitude,
+                totalDistanceMeters = decision.totalDistanceMeters
+            )?.let(_lapCompletions::tryEmit)
+        }
         traceRecorder.record(
             location = location,
             motionState = motionDetector?.isMoving?.value,
@@ -76,6 +96,7 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
     @SuppressLint("MissingPermission")
     fun start(): Result<Unit> = runCatching {
         engine.reset()
+        lapDetector.reset()
         publishResetState()
         traceRecorder.startSession()
         fusedClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())

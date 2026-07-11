@@ -19,3 +19,4 @@
 
 # Local hand-off notes and generated previews are disposable.
 /tmp/
+/artifacts/

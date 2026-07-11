@@ -31,6 +31,41 @@ class TrackingEngineTest {
         assertTrue(recovered.totalDistanceMeters in 11f..13f)
     }
 
+    @Test fun sustainedHighSpeedReanchorsAndRecoversInsteadOfBecomingPermanentJump() {
+        val engine = TrackingEngine()
+        engine.process(sample(1_000, 0.0))
+
+        val rejected = (1..7).map { index ->
+            engine.process(sample(1_000L + index * 1_000L, index * 10.0))
+        }
+
+        assertTrue(rejected.all { it.disposition == TrackingDisposition.Ignored })
+        assertTrue(rejected.none { it.reason.startsWith("jump_gt_100m") })
+        assertEquals(1, rejected.count { it.alert == TrackingAlert.HighSpeedStarted })
+
+        val recovered = engine.process(sample(9_000, 75.0))
+        assertEquals(TrackingDisposition.Accepted, recovered.disposition)
+        assertEquals(TrackingAlert.Recovered, recovered.alert)
+        assertTrue(recovered.totalDistanceMeters in 4f..6f)
+    }
+
+    @Test fun consistentLocationsAfterHugeJumpReanchorWithoutAddingUncertainGap() {
+        val engine = TrackingEngine()
+        engine.process(sample(1_000, 0.0))
+        engine.process(sample(2_000, 500.0))
+        engine.process(sample(3_000, 503.0))
+        engine.process(sample(4_000, 506.0))
+        val reanchored = engine.process(sample(5_000, 509.0))
+        assertEquals("jump_gt_100m_reanchored", reanchored.reason)
+        assertEquals(TrackingAlert.LocationJumpStarted, reanchored.alert)
+        assertEquals(0f, reanchored.totalDistanceMeters)
+
+        val recovered = engine.process(sample(6_000, 513.0))
+        assertEquals(TrackingDisposition.Accepted, recovered.disposition)
+        assertEquals(TrackingAlert.Recovered, recovered.alert)
+        assertTrue(recovered.totalDistanceMeters in 3f..5f)
+    }
+
     @Test fun nonMonotonicPointIsIgnoredWithoutNegativeGrowth() {
         val engine = TrackingEngine()
         engine.process(sample(10_000, 0.0))

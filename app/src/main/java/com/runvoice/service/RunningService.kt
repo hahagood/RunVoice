@@ -21,6 +21,7 @@ import com.runvoice.core.RunCommand
 import com.runvoice.core.RunSessionController
 import com.runvoice.core.AnnouncementEvent
 import com.runvoice.core.AnnouncementPolicy
+import com.runvoice.core.TrackingAlert
 import com.runvoice.model.RunData
 import com.runvoice.tracker.GpsTracker
 import com.runvoice.tracker.HeartRateMonitor
@@ -76,11 +77,13 @@ class RunningService : Service() {
 
     private var collectJob: Job? = null
     private var stationaryPromptJob: Job? = null
+    private var trackerEventJob: Job? = null
     private var preRunHrJob: Job? = null
     private var maxHeartRate = 0
     private var mediaSession: MediaSession? = null
     private var lastMediaButtonHandledAt = 0L
     private var lastStationaryPromptAt = 0L
+    private var lastLapElapsedSeconds = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -138,6 +141,7 @@ class RunningService : Service() {
         }
         preRunHrJob?.cancel()
         announcementPolicy.reset()
+        lastLapElapsedSeconds = 0L
         maxHeartRate = heartRateMonitor.heartRate.value.coerceAtLeast(0)
         _runData.value = RunData(
             heartRate = heartRateMonitor.heartRate.value,
@@ -177,6 +181,7 @@ class RunningService : Service() {
         }
 
         startCollecting()
+        startTrackerEventObservation()
         startStationaryPromptObservation()
         voiceAnnouncer.speak("开始跑步")
     }
@@ -233,6 +238,7 @@ class RunningService : Service() {
 
         collectJob?.cancel()
         stationaryPromptJob?.cancel()
+        trackerEventJob?.cancel()
         runTimer.reset()
         gpsTracker.stopUpdates()
         motionDetector.stop()
@@ -347,6 +353,43 @@ class RunningService : Service() {
                         voiceAnnouncer.speak("检测为静止")
                     }
                 }
+        }
+    }
+
+    private fun startTrackerEventObservation() {
+        trackerEventJob?.cancel()
+        trackerEventJob = serviceScope.launch {
+            launch {
+                gpsTracker.trackingAlerts.collect { alert ->
+                    val data = _runData.value
+                    if (!data.isRunning || data.isPaused) return@collect
+                    val prompt = when (alert) {
+                        TrackingAlert.HighSpeedStarted -> "检测到速度超过跑步范围，距离记录暂时中断"
+                        TrackingAlert.LocationJumpStarted -> "定位发生跳点，距离记录暂时中断"
+                        TrackingAlert.Recovered -> "定位已恢复，继续记录距离"
+                    }
+                    voiceAnnouncer.speakPriority(prompt)
+                }
+            }
+            launch {
+                gpsTracker.lapCompletions.collect { lap ->
+                    val data = _runData.value
+                    if (!data.isRunning || data.isPaused) return@collect
+                    val elapsed = runTimer.elapsedSeconds.value
+                    val lapElapsed = (elapsed - lastLapElapsedSeconds).coerceAtLeast(0L)
+                    lastLapElapsedSeconds = elapsed
+                    val averagePace = if (lap.lapDistanceMeters > 0f && lapElapsed > 0L) {
+                        (lapElapsed * 1_000f / lap.lapDistanceMeters).toInt()
+                    } else {
+                        0
+                    }
+                    voiceAnnouncer.announceLap(
+                        lapNumber = lap.lapNumber,
+                        distanceMeters = lap.lapDistanceMeters,
+                        averagePaceSecondsPerKm = averagePace
+                    )
+                }
+            }
         }
     }
 

@@ -12,6 +12,7 @@ import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import java.util.Locale
+import kotlin.math.roundToInt
 
 class VoiceAnnouncer(context: Context) {
 
@@ -26,6 +27,7 @@ class VoiceAnnouncer(context: Context) {
     private var failed = false
     private var speaking = false
     private val pendingUtterances = ArrayDeque<Pair<String, String>>()
+    private val pendingPriorityUtterances = ArrayDeque<Pair<String, String>>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingSpeakRunnable: Runnable? = null
     private val audioManager = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -53,6 +55,7 @@ class VoiceAnnouncer(context: Context) {
             } else {
                 failed = true
                 pendingUtterances.clear()
+                pendingPriorityUtterances.clear()
                 Log.w(TAG, "TTS init failed with status=$status")
             }
         }
@@ -81,8 +84,33 @@ class VoiceAnnouncer(context: Context) {
         enqueueOrSpeak("当前配速${formatPaceForSpeech(paceSecondsPerKm)}每公里", "pace_${System.currentTimeMillis()}")
     }
 
+    fun announceLap(lapNumber: Int, distanceMeters: Float, averagePaceSecondsPerKm: Int) {
+        if (lapNumber <= 0 || distanceMeters <= 0f) return
+        val lapText = ordinalForSpeech(lapNumber)
+        val nextLapText = ordinalForSpeech(lapNumber + 1)
+        val distanceText = if (distanceMeters < 1_000f) {
+            "${distanceMeters.roundToInt()}米"
+        } else {
+            "${String.format(Locale.CHINA, "%.2f", distanceMeters / 1_000f)}公里"
+        }
+        val paceText = if (averagePaceSecondsPerKm > 0) {
+            "平均配速${formatPaceForSpeech(averagePaceSecondsPerKm)}每公里，"
+        } else {
+            ""
+        }
+        enqueueOrSpeak(
+            "${lapText}段完成，${paceText}距离${distanceText}。${nextLapText}段开始",
+            "lap_$lapNumber"
+        )
+    }
+
     fun speak(text: String) {
         enqueueOrSpeak(text, "custom_${System.currentTimeMillis()}")
+    }
+
+    /** Puts safety and tracking-health prompts ahead of queued routine announcements. */
+    fun speakPriority(text: String) {
+        enqueueOrSpeak(text, "priority_${System.currentTimeMillis()}", priority = true)
     }
 
     fun shutdown() {
@@ -96,6 +124,7 @@ class VoiceAnnouncer(context: Context) {
         ready = false
         speaking = false
         pendingUtterances.clear()
+        pendingPriorityUtterances.clear()
     }
 
     private fun configureTts() {
@@ -145,12 +174,13 @@ class VoiceAnnouncer(context: Context) {
         Locale.CHINESE
     )
 
-    private fun enqueueOrSpeak(text: String, utteranceId: String) {
+    private fun enqueueOrSpeak(text: String, utteranceId: String, priority: Boolean = false) {
         if (failed) {
             Log.w(TAG, "Ignoring TTS after initialization failure: $utteranceId")
             return
         }
-        pendingUtterances.addLast(text to utteranceId)
+        if (priority) pendingPriorityUtterances.addLast(text to utteranceId)
+        else pendingUtterances.addLast(text to utteranceId)
         if (!ready) {
             Log.d(TAG, "Queueing TTS before init: $utteranceId")
             return
@@ -159,9 +189,13 @@ class VoiceAnnouncer(context: Context) {
     }
 
     private fun speakNextIfIdle() {
-        if (!ready || speaking || pendingUtterances.isEmpty()) return
+        if (!ready || speaking || (pendingPriorityUtterances.isEmpty() && pendingUtterances.isEmpty())) return
         val engine = tts ?: return
-        val (text, utteranceId) = pendingUtterances.removeFirst()
+        val (text, utteranceId) = if (pendingPriorityUtterances.isNotEmpty()) {
+            pendingPriorityUtterances.removeFirst()
+        } else {
+            pendingUtterances.removeFirst()
+        }
         speaking = true
 
         val speakAction = Runnable {
@@ -213,5 +247,22 @@ class VoiceAnnouncer(context: Context) {
         val minutes = secondsPerKm / 60
         val seconds = secondsPerKm % 60
         return "${minutes}分${seconds}秒"
+    }
+
+    private fun ordinalForSpeech(number: Int): String {
+        val numeral = when (number) {
+            1 -> "一"
+            2 -> "二"
+            3 -> "三"
+            4 -> "四"
+            5 -> "五"
+            6 -> "六"
+            7 -> "七"
+            8 -> "八"
+            9 -> "九"
+            10 -> "十"
+            else -> number.toString()
+        }
+        return "第$numeral"
     }
 }
