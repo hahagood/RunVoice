@@ -103,26 +103,25 @@ class RunSummaryImageSaver(private val context: Context) {
             ),
             SummaryRow(
                 rect = RectF(card.left + px(28f), card.top + px(284f), card.right - px(28f), card.top + px(512f)),
-                label = "总用时",
+                label = "时间",
                 value = runData.timeFormatted,
                 valueColor = accentYellow
             ),
             SummaryRow(
                 rect = RectF(card.left + px(28f), card.top + px(540f), card.right - px(28f), card.top + px(768f)),
                 label = "平均配速",
-                value = "${runData.averagePaceFormatted} /km",
+                value = runData.averagePaceFormatted,
                 valueColor = if (runData.distanceMeters > 0f) accentYellow else textMuted
             ),
             SummaryRow(
                 rect = RectF(card.left + px(28f), card.top + px(796f), card.right - px(28f), card.top + px(1024f)),
                 label = "最大心率",
-                value = if (runData.maxHeartRate > 0) "${runData.maxHeartRate} bpm" else "-- bpm",
+                value = if (runData.maxHeartRate > 0) runData.maxHeartRate.toString() else "--",
                 valueColor = if (runData.maxHeartRate > 0) accentRed else textMuted
             )
         )
 
         rows.forEach { drawSummaryRowBackground(canvas, it.rect, bgColor) }
-        rows.forEach { drawSummaryRowText(canvas, it, textSecondary) }
         if (tracePoints.size >= 2) {
             drawTraceOverlay(
                 canvas = canvas,
@@ -133,6 +132,7 @@ class RunSummaryImageSaver(private val context: Context) {
                 endpointInnerColor = 0xFF252832.toInt()
             )
         }
+        rows.forEach { drawSummaryRowText(canvas, it, textSecondary, bgColor) }
     }
 
     private fun drawSummaryRowBackground(
@@ -151,6 +151,7 @@ class RunSummaryImageSaver(private val context: Context) {
         canvas: Canvas,
         row: SummaryRow,
         labelColor: Int,
+        scrimColor: Int,
     ) {
         val scale = canvas.width / 1080f
         fun px(value: Float) = value * scale
@@ -169,9 +170,38 @@ class RunSummaryImageSaver(private val context: Context) {
         val rect = row.rect
         val labelBaseline = rect.centerY() + px(18f)
         val valueBaseline = rect.centerY() + px(18f)
-        canvas.drawText(row.label, rect.left + px(34f), labelBaseline, labelPaint)
+        val labelX = rect.left + px(34f)
+        val labelWidth = labelPaint.measureText(row.label)
         val valueWidth = valuePaint.measureText(row.value)
-        canvas.drawText(row.value, rect.right - px(34f) - valueWidth, valueBaseline, valuePaint)
+        val valueX = rect.right - px(34f) - valueWidth
+        val scrimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = scrimColor.withAlpha(TEXT_SCRIM_ALPHA)
+        }
+        drawTextScrim(canvas, labelX, labelBaseline, labelWidth, labelPaint, scrimPaint)
+        drawTextScrim(canvas, valueX, valueBaseline, valueWidth, valuePaint, scrimPaint)
+        canvas.drawText(row.label, labelX, labelBaseline, labelPaint)
+        canvas.drawText(row.value, valueX, valueBaseline, valuePaint)
+    }
+
+    private fun drawTextScrim(
+        canvas: Canvas,
+        textX: Float,
+        baseline: Float,
+        textWidth: Float,
+        textPaint: TextPaint,
+        scrimPaint: Paint,
+    ) {
+        val scale = canvas.width / 1080f
+        val horizontalPadding = 14f * scale
+        val verticalPadding = 10f * scale
+        val metrics = textPaint.fontMetrics
+        val bounds = RectF(
+            textX - horizontalPadding,
+            baseline + metrics.ascent - verticalPadding,
+            textX + textWidth + horizontalPadding,
+            baseline + metrics.descent + verticalPadding,
+        )
+        canvas.drawRoundRect(bounds, 15f * scale, 15f * scale, scrimPaint)
     }
 
     private fun drawTraceOverlay(
@@ -414,6 +444,7 @@ class RunSummaryImageSaver(private val context: Context) {
         private const val OFFSET_TRANSITION_METERS = 35f
         private const val STACK_SHIFT_X_PX = 7f
         private const val STACK_SHIFT_Y_PX = 11f
+        private const val TEXT_SCRIM_ALPHA = 145
     }
 
     private fun timestampForFile(timeMillis: Long): String {

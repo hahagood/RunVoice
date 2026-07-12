@@ -102,12 +102,15 @@ internal class TraceGeometry {
      */
     private fun detectClosedLapLevels(points: List<TracePoint>, projected: List<RoutePoint>): IntArray? {
         val detector = LapDetector()
-        val lapEndIndices = mutableListOf<Int>()
-        points.forEachIndexed { index, point ->
+        val lapEndDistances = mutableListOf<Float>()
+        points.forEach { point ->
             detector.process(point.latitude, point.longitude, point.distanceMeters)?.let {
-                lapEndIndices += index
+                lapEndDistances += it.totalDistanceMeters
             }
         }
+        val lapEndIndices = lapEndDistances.map { completionDistance ->
+            points.indices.minBy { index -> abs(points[index].distanceMeters - completionDistance) }
+        }.distinct()
         if (lapEndIndices.isEmpty()) return null
 
         val levels = IntArray(points.size)

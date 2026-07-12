@@ -91,8 +91,8 @@ class TraceGeometryTest {
 
         val route = TraceGeometry().analyze(points)
 
-        assertTrue(route.take(35).all { it.repeatLevel == 0 })
-        assertTrue(route.drop(35).all { it.repeatLevel == 1 })
+        assertTrue(route.take(37).all { it.repeatLevel == 0 })
+        assertTrue(route.drop(37).all { it.repeatLevel == 1 })
     }
 
     @Test fun keepsExitAfterThreeLocalLapsOnAFourthLayer() {
