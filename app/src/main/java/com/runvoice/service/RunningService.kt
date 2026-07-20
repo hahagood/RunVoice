@@ -19,6 +19,7 @@ import com.runvoice.MainActivity
 import com.runvoice.R
 import com.runvoice.core.RunCommand
 import com.runvoice.core.RunSessionController
+import com.runvoice.core.RunSessionState
 import com.runvoice.core.AnnouncementEvent
 import com.runvoice.core.AnnouncementPolicy
 import com.runvoice.core.TrackingAlert
@@ -98,7 +99,7 @@ class RunningService : Service() {
             hrConnectedProvider = { heartRateMonitor.connected.value }
         )
         runTimer = RunTimer()
-        voiceAnnouncer = VoiceAnnouncer(this)
+        voiceAnnouncer = VoiceAnnouncer(this, onRecovered = ::announceVoiceRecovery)
         metronome = Metronome()
         // Restore saved metronome BPM and auto-start if was active
         metronome.setBpm(prefs.getInt("metronome_bpm", 180))
@@ -505,11 +506,15 @@ class RunningService : Service() {
         )
     }
 
-    private fun announceCurrentStats() {
+    private fun announceCurrentStats(
+        leadingText: String? = null,
+        recoveryStatus: Boolean = false,
+    ) {
         val data = _runData.value
-        if (!data.isRunning) return
+        if (!hasActiveRunSession()) return
 
         val parts = buildList {
+            leadingText?.let(::add)
             add("现在时间${formatCurrentTimeForSpeech()}")
             add("当前已跑${data.distanceFormatted}公里")
             add("用时${formatTimeForSpeech(data.elapsedSeconds)}")
@@ -528,7 +533,22 @@ class RunningService : Service() {
             }
         }
 
-        voiceAnnouncer.speak(parts.joinToString("，"))
+        val text = parts.joinToString("，")
+        if (recoveryStatus) voiceAnnouncer.speakRecoveryStatus(text) else voiceAnnouncer.speak(text)
+    }
+
+    private fun announceVoiceRecovery() {
+        val data = _runData.value
+        if (!hasActiveRunSession()) return
+        Log.w(TAG, "TTS recovered during an active run at ${data.distanceMeters}m")
+        updateNotification(
+            "语音已恢复 · ${if (data.isPaused) "已暂停" else "跑步中"} " +
+                "${data.timeFormatted} · ${data.distanceFormatted}km"
+        )
+        announceCurrentStats(
+            leadingText = "语音播报已自动恢复",
+            recoveryStatus = true,
+        )
     }
 
     private fun formatCurrentTimeForSpeech(): String {
@@ -638,6 +658,18 @@ class RunningService : Service() {
         gpsTracker.flushTrace()
         return gpsTracker.currentTracePath()
     }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (hasActiveRunSession()) {
+            Log.w(TAG, "Running task removed; proactively reconnecting TTS without stopping tracking")
+            voiceAnnouncer.reconnectAfterExternalCleanup()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
+    private fun hasActiveRunSession(): Boolean =
+        sessionController.state == RunSessionState.Running ||
+            sessionController.state == RunSessionState.Paused
 
     override fun onDestroy() {
         mediaSession?.release()
