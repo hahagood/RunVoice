@@ -12,7 +12,9 @@ import com.runvoice.model.RunData
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.hypot
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 
 class RunSummaryImageSaver(private val context: Context) {
     private val traceReader = TraceCsvReader()
@@ -217,8 +219,8 @@ class RunSummaryImageSaver(private val context: Context) {
         fun px(value: Float) = value * scale
 
         val screenPoints = projectTracePointsWithRepeatLevels(tracePoints, routeRect) ?: return
-        val routeNormals = routeNormals(screenPoints)
-        val visualOffsets = smoothedLayerOffsets(screenPoints)
+        val visualLevels = smoothedLayerLevels(screenPoints)
+        val stackDir = stackDirection(screenPoints)
         val segments = mutableListOf<TraceRenderSegment>()
         var startIndex = 0
         while (startIndex < screenPoints.lastIndex) {
@@ -231,19 +233,19 @@ class RunSummaryImageSaver(private val context: Context) {
             val routeStyle = routeStyleForRepeatLevel(level)
             val segmentPath = buildLayerPath(
                 screenPoints,
-                routeNormals,
-                visualOffsets,
+                visualLevels,
+                stackDir,
                 startIndex,
                 endIndex,
             )
             val visualLane = screenPoints[startIndex + 1].visualLane.toFloat()
             val depth = px(
-                (3f + visualLane * 0.6f).coerceAtMost(MAX_EXTRUSION_DEPTH_PX)
+                (3f + visualLane * 1.8f).coerceAtMost(MAX_EXTRUSION_DEPTH_PX)
             )
             val extrusionPath = buildLayerPath(
                 screenPoints,
-                routeNormals,
-                visualOffsets,
+                visualLevels,
+                stackDir,
                 startIndex,
                 endIndex,
                 shiftX = -depth * 0.46f,
@@ -261,14 +263,14 @@ class RunSummaryImageSaver(private val context: Context) {
             val extrusionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = routeStyle.edgeColor
                 style = Paint.Style.STROKE
-                strokeWidth = px(routeStyle.strokeWidth + 5.5f)
+                strokeWidth = px(routeStyle.strokeWidth + 3.5f)
                 strokeCap = Paint.Cap.ROUND
                 strokeJoin = Paint.Join.ROUND
             }
             val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = 0x55000000
                 style = Paint.Style.STROKE
-                strokeWidth = px(routeStyle.strokeWidth + 8f)
+                strokeWidth = px(routeStyle.strokeWidth + 5f)
                 strokeCap = Paint.Cap.ROUND
                 strokeJoin = Paint.Join.ROUND
             }
@@ -282,15 +284,16 @@ class RunSummaryImageSaver(private val context: Context) {
             val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = routeStyle.color.withAlpha(routeStyle.glowAlpha)
                 style = Paint.Style.STROKE
-                strokeWidth = px(routeStyle.strokeWidth + 5f)
+                strokeWidth = px(routeStyle.strokeWidth + 3f)
                 strokeCap = Paint.Cap.ROUND
                 strokeJoin = Paint.Join.ROUND
             }
             canvas.drawPath(segment.path, glowPaint)
         }
 
-        // Draw every colored core last. Local-normal lane offsets keep same- and reverse-direction
-        // passes visible for any route orientation instead of relying on one global diagonal shift.
+        // Draw every colored core last. Each repeat phase is stacked by a rigid per-lane translation
+        // along stackDir (perpendicular to the route's principal axis) so overlapping laps read as
+        // layered strata instead of concentric rings; thin cores keep adjacent layers distinct.
         segments.forEach { segment ->
             val routeStyle = segment.style
             val routePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -303,7 +306,7 @@ class RunSummaryImageSaver(private val context: Context) {
             val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = routeStyle.highlightColor.withAlpha(150)
                 style = Paint.Style.STROKE
-                strokeWidth = px(1.35f)
+                strokeWidth = px(0.9f)
                 strokeCap = Paint.Cap.ROUND
                 strokeJoin = Paint.Join.ROUND
             }
@@ -312,42 +315,32 @@ class RunSummaryImageSaver(private val context: Context) {
         }
 
         drawTraceEndpoint(canvas, screenPoints.first().point, startColor.withAlpha(170), endpointInnerColor.withAlpha(150), px(7f), filled = true)
-        val finishPoint = stackedScreenPoint(
-            point = screenPoints.last().point,
-            normal = routeNormals.last(),
-            visualOffset = visualOffsets.last(),
-        )
+        val finishPoint = stackedScreenPoint(screenPoints.last().point, visualLevels.last(), stackDir)
         drawTraceEndpoint(canvas, finishPoint, finishColor.withAlpha(210), endpointInnerColor.withAlpha(190), px(7f), filled = false)
     }
 
     private fun routeStyleForRepeatLevel(repeatLevel: Int): RouteStyle {
         return when (Math.floorMod(repeatLevel, ROUTE_STYLE_COUNT)) {
-            0 -> RouteStyle(0xFF42C77A.toInt(), 0xFF1F6B45.toInt(), 0xFFA6E8BD.toInt(), 6.4f, 62)
-            1 -> RouteStyle(0xFFA875F5.toInt(), 0xFF5B3D91.toInt(), 0xFFD3B7FF.toInt(), 6.2f, 72)
-            2 -> RouteStyle(0xFFF58C4A.toInt(), 0xFF854725.toInt(), 0xFFFFC09A.toInt(), 6.2f, 78)
-            3 -> RouteStyle(0xFFD96BC5.toInt(), 0xFF78386F.toInt(), 0xFFF0AFE4.toInt(), 6.1f, 82)
-            4 -> RouteStyle(0xFF82C653.toInt(), 0xFF466D2B.toInt(), 0xFFBDE49C.toInt(), 6f, 86)
-            5 -> RouteStyle(0xFFC48655.toInt(), 0xFF70472C.toInt(), 0xFFE2B995.toInt(), 6f, 88)
-            else -> RouteStyle(0xFF55C9A5.toInt(), 0xFF2B705C.toInt(), 0xFFA1E4CF.toInt(), 6f, 90)
+            0 -> RouteStyle(0xFF42C77A.toInt(), 0xFF1F6B45.toInt(), 0xFFA6E8BD.toInt(), 4.0f, 62)
+            1 -> RouteStyle(0xFFA875F5.toInt(), 0xFF5B3D91.toInt(), 0xFFD3B7FF.toInt(), 3.9f, 72)
+            2 -> RouteStyle(0xFFF58C4A.toInt(), 0xFF854725.toInt(), 0xFFFFC09A.toInt(), 3.9f, 78)
+            3 -> RouteStyle(0xFFD96BC5.toInt(), 0xFF78386F.toInt(), 0xFFF0AFE4.toInt(), 3.8f, 82)
+            4 -> RouteStyle(0xFF82C653.toInt(), 0xFF466D2B.toInt(), 0xFFBDE49C.toInt(), 3.7f, 86)
+            5 -> RouteStyle(0xFFC48655.toInt(), 0xFF70472C.toInt(), 0xFFE2B995.toInt(), 3.7f, 88)
+            else -> RouteStyle(0xFF55C9A5.toInt(), 0xFF2B705C.toInt(), 0xFFA1E4CF.toInt(), 3.7f, 90)
         }
     }
 
-    private fun smoothedLayerOffsets(points: List<ScreenTracePoint>): FloatArray {
+    private fun smoothedLayerLevels(points: List<ScreenTracePoint>): FloatArray {
         if (points.isEmpty()) return FloatArray(0)
 
-        val highestLane = points.maxOf(ScreenTracePoint::visualLane)
-        val laneSpacing = if (highestLane > 0) {
-            minOf(STACK_NORMAL_SPACING_PX, MAX_STACK_OFFSET_PX / highestLane)
-        } else {
-            STACK_NORMAL_SPACING_PX
-        }
-        val nominalOffsets = points.map { point -> point.visualLane * laneSpacing }
-        val offsets = nominalOffsets.toFloatArray()
+        val nominalLevels = points.map { it.visualLane.toFloat() }
+        val levels = nominalLevels.toFloatArray()
         val boundaries = mutableListOf<OffsetBoundary>()
 
         for (index in 0 until points.lastIndex) {
-            val fromOffset = nominalOffsets[index]
-            val toOffset = nominalOffsets[index + 1]
+            val fromOffset = nominalLevels[index]
+            val toOffset = nominalLevels[index + 1]
             if (fromOffset != toOffset) {
                 boundaries.add(
                     OffsetBoundary(
@@ -359,7 +352,7 @@ class RunSummaryImageSaver(private val context: Context) {
             }
         }
 
-        if (boundaries.isEmpty()) return offsets
+        if (boundaries.isEmpty()) return levels
 
         points.forEachIndexed { index, point ->
             val nearestBoundary = boundaries.minByOrNull { boundary ->
@@ -369,70 +362,74 @@ class RunSummaryImageSaver(private val context: Context) {
             if (distanceFromBoundary <= OFFSET_TRANSITION_METERS) {
                 val progress = ((point.distanceMeters - nearestBoundary.distanceMeters + OFFSET_TRANSITION_METERS) /
                     (OFFSET_TRANSITION_METERS * 2f)).coerceIn(0f, 1f)
-                offsets[index] = nearestBoundary.fromOffset +
+                levels[index] = nearestBoundary.fromOffset +
                     (nearestBoundary.toOffset - nearestBoundary.fromOffset) * progress
             }
         }
 
-        return offsets
+        return levels
     }
 
     private fun buildLayerPath(
         points: List<ScreenTracePoint>,
-        normals: Array<PointF>,
-        visualOffsets: FloatArray,
+        visualLevels: FloatArray,
+        stackDir: PointF,
         startIndex: Int,
         endIndex: Int,
         shiftX: Float = 0f,
         shiftY: Float = 0f,
     ): Path = Path().apply {
-        val start = stackedScreenPoint(
-            points[startIndex].point,
-            normals[startIndex],
-            visualOffsets[startIndex],
-        )
+        val start = stackedScreenPoint(points[startIndex].point, visualLevels[startIndex], stackDir)
         moveTo(start.x + shiftX, start.y + shiftY)
         for (index in (startIndex + 1)..endIndex) {
-            val point = stackedScreenPoint(points[index].point, normals[index], visualOffsets[index])
+            val point = stackedScreenPoint(points[index].point, visualLevels[index], stackDir)
             lineTo(point.x + shiftX, point.y + shiftY)
         }
     }
 
-    private fun stackedScreenPoint(point: PointF, normal: PointF, visualOffset: Float): PointF {
+    private fun stackedScreenPoint(point: PointF, visualLevel: Float, stackDir: PointF): PointF {
         return PointF(
-            point.x + normal.x * visualOffset,
-            point.y + normal.y * visualOffset,
+            point.x + visualLevel * STACK_OFFSET_PX * stackDir.x,
+            point.y + visualLevel * STACK_OFFSET_PX * stackDir.y,
         )
     }
 
-    private fun routeNormals(points: List<ScreenTracePoint>): Array<PointF> =
-        Array(points.size) { index ->
-            val centerDistance = points[index].distanceMeters
-            var startIndex = index
-            while (startIndex > 0 &&
-                centerDistance - points[startIndex].distanceMeters < NORMAL_SAMPLE_METERS
-            ) startIndex--
-            var endIndex = index
-            while (endIndex < points.lastIndex &&
-                points[endIndex].distanceMeters - centerDistance < NORMAL_SAMPLE_METERS
-            ) endIndex++
-
-            var dx = points[endIndex].point.x - points[startIndex].point.x
-            var dy = points[endIndex].point.y - points[startIndex].point.y
-            var length = hypot(dx, dy)
-            if (length < MIN_NORMAL_VECTOR_PX) {
-                val fallbackStart = (index - 1).coerceAtLeast(0)
-                val fallbackEnd = (index + 1).coerceAtMost(points.lastIndex)
-                dx = points[fallbackEnd].point.x - points[fallbackStart].point.x
-                dy = points[fallbackEnd].point.y - points[fallbackStart].point.y
-                length = hypot(dx, dy)
-            }
-            if (length < MIN_NORMAL_VECTOR_PX) {
-                PointF(0f, -1f)
-            } else {
-                PointF(-dy / length, dx / length)
-            }
+    /**
+     * A single screen-space direction used to slide each repeat lane off its predecessor. Chosen
+     * perpendicular to the route's principal axis (the direction of greatest spread), because a
+     * rigid translation only separates overlapping passes by its component perpendicular to them —
+     * a fixed diagonal collapses ingress/egress corridors that happen to run along that diagonal.
+     * Oriented so lanes stack upward on screen.
+     */
+    private fun stackDirection(points: List<ScreenTracePoint>): PointF {
+        if (points.size < 2) return PointF(0f, -1f)
+        var meanX = 0.0
+        var meanY = 0.0
+        for (p in points) {
+            meanX += p.point.x
+            meanY += p.point.y
         }
+        meanX /= points.size
+        meanY /= points.size
+        var sxx = 0.0
+        var syy = 0.0
+        var sxy = 0.0
+        for (p in points) {
+            val dx = p.point.x - meanX
+            val dy = p.point.y - meanY
+            sxx += dx * dx
+            syy += dy * dy
+            sxy += dx * dy
+        }
+        val majorAngle = 0.5 * atan2(2.0 * sxy, sxx - syy)
+        var perpX = -sin(majorAngle)
+        var perpY = cos(majorAngle)
+        if (perpY > 0) {
+            perpX = -perpX
+            perpY = -perpY
+        }
+        return PointF(perpX.toFloat(), perpY.toFloat())
+    }
 
     private fun projectTracePointsWithRepeatLevels(points: List<TracePoint>, rect: RectF): List<ScreenTracePoint>? {
         val projected = traceGeometry.analyze(points)
@@ -525,11 +522,8 @@ class RunSummaryImageSaver(private val context: Context) {
     private companion object {
         private const val ROUTE_STYLE_COUNT = 7
         private const val OFFSET_TRANSITION_METERS = 35f
-        private const val STACK_NORMAL_SPACING_PX = 6f
-        private const val MAX_STACK_OFFSET_PX = 42f
-        private const val MAX_EXTRUSION_DEPTH_PX = 7.2f
-        private const val NORMAL_SAMPLE_METERS = 18f
-        private const val MIN_NORMAL_VECTOR_PX = 0.1f
+        private const val STACK_OFFSET_PX = 13f
+        private const val MAX_EXTRUSION_DEPTH_PX = 10f
         private const val TEXT_SCRIM_ALPHA = 145
     }
 
