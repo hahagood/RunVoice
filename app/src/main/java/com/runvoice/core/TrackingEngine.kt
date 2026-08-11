@@ -43,7 +43,12 @@ data class TrackingConfig(
     val rejectedChainMaxSpeedMetersPerSecond: Float = 15f,
     val rejectedChainMinSamples: Int = 4,
     val rejectedChainMinDurationMillis: Long = 3_000L,
-    val trackingAlertDelayMillis: Long = 5_000L,
+    val trackingAlertDelayMillis: Long = 15_000L,
+    val trackingAlertMinIntervalMillis: Long = 60_000L,
+    val trackingRecoveryDurationMillis: Long = 10_000L,
+    val trackingRecoveryMinSamples: Int = 5,
+    val stationaryEntryDurationMillis: Long = 5_000L,
+    val stationaryEntryMovementSpeedMetersPerSecond: Float = 0.8f,
     val gpsMovingStepMeters: Float = 3f,
     val confirmationDistanceMeters: Float = 40f,
     val confirmationDisplacementMeters: Float = 25f,
@@ -52,7 +57,7 @@ data class TrackingConfig(
     val confirmationMinStableSamples: Int = 4,
     val confirmationMaxSpeedSpread: Float = 2.5f,
     val confirmationMaxSpeedRatio: Float = 3f,
-    val paceSegmentMeters: Float = 100f,
+    val paceSegmentMeters: Float = 50f,
     val paceBufferSize: Int = 5
 )
 
@@ -68,17 +73,22 @@ class TrackingEngine(private val config: TrackingConfig = TrackingConfig()) {
     private var stationaryDetected = false
     private var gpsMovementOverride = false
     private var stationaryAnchor: LocationSample? = null
+    private var stationaryCandidateStart: LocationSample? = null
     private var pendingStart: LocationSample? = null
     private var pendingDistance = 0f
     private val pendingSpeeds = ArrayDeque<Float>(config.confirmationSpeedWindowSize)
 
     private var trackingIssue: TrackingIssue? = null
-    private var trackingIssueStartedAtMillis = 0L
-    private var trackingIssueAnnounced = false
     private var rejectedChainStart: LocationSample? = null
     private var rejectedChainLast: LocationSample? = null
     private var rejectedChainSamples = 0
     private var followingRejectedChain = false
+    private var alertEpisodeIssue: TrackingIssue? = null
+    private var alertEpisodeStartedAtMillis = 0L
+    private var alertEpisodeAnnounced = false
+    private var lastTrackingAlertAtMillis = 0L
+    private var trackingRecoveryStartedAtMillis = 0L
+    private var trackingRecoverySamples = 0
 
     fun reset() {
         lastSample = null
@@ -95,8 +105,16 @@ class TrackingEngine(private val config: TrackingConfig = TrackingConfig()) {
         lastSample = null
         segmentDistance = 0f
         segmentStartElapsedMillis = 0L
+        paceBuffer.clear()
+        paceSecondsPerKm = 0
         clearStationaryLock()
         clearTrackingIssue()
+    }
+
+    fun restoreDistance(distanceMeters: Float) {
+        require(distanceMeters.isFinite() && distanceMeters >= 0f)
+        reset()
+        totalDistance = distanceMeters
     }
 
     fun process(sample: LocationSample): TrackingDecision {
@@ -119,27 +137,51 @@ class TrackingEngine(private val config: TrackingConfig = TrackingConfig()) {
 
         val distance = distanceMeters(previous, sample)
         if (!distance.isFinite()) return ignored("invalid_distance")
-        if (distance > config.maxJumpMeters) {
+        val derivedSpeed = distance / (elapsedMillis / 1000f)
+        if (distance > config.maxJumpMeters &&
+            (!derivedSpeed.isFinite() || derivedSpeed > config.maxSpeedMetersPerSecond)
+        ) {
             return rejectAndTrackRecovery(sample, TrackingIssue.LocationJump, "jump_gt_100m", distance)
         }
-
-        val derivedSpeed = distance / (elapsedMillis / 1000f)
         if (!derivedSpeed.isFinite() || derivedSpeed > config.maxSpeedMetersPerSecond) {
             return rejectAndTrackRecovery(sample, TrackingIssue.HighSpeed, "speed_above_7_mps", distance)
         }
 
-        val recoveryAlert = finishTrackingIssueIfNeeded()
+        val recoveryAlert = observeHealthyTracking(sample.elapsedRealtimeMillis)
         // Valid samples advance the local GPS chain. Rejected samples are handled by a separate
         // quarantine chain so a sustained anomaly cannot leave this anchor permanently stale.
         lastSample = sample
         val wasStationary = stationaryDetected
         val gpsIndicatesMovement = (sample.speedMetersPerSecond ?: derivedSpeed) >= config.minSpeedMetersPerSecond ||
             distance >= config.gpsMovingStepMeters
+        val gpsConfirmsMovementForStationaryEntry =
+            derivedSpeed >= config.stationaryEntryMovementSpeedMetersPerSecond ||
+                distance >= config.gpsMovingStepMeters
         var distanceToAdd = distance
         var reason = "distance_accumulated"
+        val waitingForStationaryEntry = !wasStationary &&
+            sample.motionMoving == false &&
+            !gpsConfirmsMovementForStationaryEntry
+        val stationaryEntryConfirmed = if (waitingForStationaryEntry) {
+            if (stationaryCandidateStart == null) stationaryCandidateStart = previous
+            val candidateStart = requireNotNull(stationaryCandidateStart)
+            sample.elapsedRealtimeMillis - candidateStart.elapsedRealtimeMillis >=
+                config.stationaryEntryDurationMillis
+        } else {
+            if (!wasStationary) stationaryCandidateStart = null
+            false
+        }
 
-        if (sample.motionMoving == false || wasStationary) {
-            if (!gpsMovementOverride && stationaryAnchor == null) stationaryAnchor = previous
+        if (waitingForStationaryEntry && !stationaryEntryConfirmed) {
+            stationaryDetected = false
+            return ignored("stationary_candidate_gps_still", distance, recoveryAlert)
+        }
+
+        if (stationaryEntryConfirmed || wasStationary) {
+            if (!gpsMovementOverride && stationaryAnchor == null) {
+                stationaryAnchor = stationaryCandidateStart ?: previous
+            }
+            stationaryCandidateStart = null
 
             if (!gpsIndicatesMovement) {
                 resetStationaryConfirmation()
@@ -190,12 +232,22 @@ class TrackingEngine(private val config: TrackingConfig = TrackingConfig()) {
                     )
                 }
 
-                val resumedDistance = stationaryAnchor?.let { distanceMeters(it, sample) } ?: pendingDistance
-                if (!resumedDistance.isFinite() || resumedDistance < 0f || resumedDistance > config.maxJumpMeters) {
+                val resumeAnchor = stationaryAnchor
+                val resumedDistance = resumeAnchor?.let { distanceMeters(it, sample) } ?: pendingDistance
+                val resumedElapsedMillis = sample.elapsedRealtimeMillis -
+                    (resumeAnchor?.elapsedRealtimeMillis ?: start.elapsedRealtimeMillis)
+                val resumedSpeed = if (resumedElapsedMillis > 0L) {
+                    resumedDistance / (resumedElapsedMillis / 1_000f)
+                } else {
+                    Float.POSITIVE_INFINITY
+                }
+                if (!resumedDistance.isFinite() || resumedDistance < 0f ||
+                    !resumedSpeed.isFinite() || resumedSpeed > config.maxSpeedMetersPerSecond
+                ) {
                     resetStationaryConfirmation()
                     stationaryAnchor = sample
                     stationaryDetected = true
-                    return ignored("stationary_resume_distance_above_limit", distance, recoveryAlert)
+                    return ignored("stationary_resume_speed_above_limit", distance, recoveryAlert)
                 }
                 gpsMovementOverride = true
                 stationaryDetected = false
@@ -212,7 +264,7 @@ class TrackingEngine(private val config: TrackingConfig = TrackingConfig()) {
             }
         }
 
-        if (!distanceToAdd.isFinite() || distanceToAdd < 0f || distanceToAdd > config.maxJumpMeters) {
+        if (!distanceToAdd.isFinite() || distanceToAdd < 0f) {
             return ignored("invalid_accepted_distance", distance, recoveryAlert)
         }
 
@@ -234,7 +286,7 @@ class TrackingEngine(private val config: TrackingConfig = TrackingConfig()) {
         reason: String,
         distanceFromAcceptedAnchor: Float
     ): TrackingDecision {
-        if (trackingIssue != issue) beginTrackingIssue(issue, sample)
+        if (trackingIssue != issue) beginRejectedChain(issue, sample)
 
         val chainPrevious = rejectedChainLast
         val continuesPlausibleChain = chainPrevious != null && isPlausibleRejectedStep(chainPrevious, sample)
@@ -265,10 +317,7 @@ class TrackingEngine(private val config: TrackingConfig = TrackingConfig()) {
             clearStationaryLock()
         }
 
-        val alert = trackingIssueAlert(
-            nowMillis = sample.elapsedRealtimeMillis,
-            force = confirmedRejectedChain && issue == TrackingIssue.LocationJump
-        )
+        val alert = observeUnhealthyTracking(issue, sample.elapsedRealtimeMillis)
         val diagnosticReason = if (followingRejectedChain) "${reason}_reanchored" else reason
         return ignored(diagnosticReason, distanceFromAcceptedAnchor, alert)
     }
@@ -282,44 +331,72 @@ class TrackingEngine(private val config: TrackingConfig = TrackingConfig()) {
         return speed.isFinite() && speed <= config.rejectedChainMaxSpeedMetersPerSecond
     }
 
-    private fun beginTrackingIssue(issue: TrackingIssue, sample: LocationSample) {
+    private fun beginRejectedChain(issue: TrackingIssue, sample: LocationSample) {
         trackingIssue = issue
-        trackingIssueStartedAtMillis = sample.elapsedRealtimeMillis
-        trackingIssueAnnounced = false
         rejectedChainStart = sample
         rejectedChainLast = null
         rejectedChainSamples = 0
         followingRejectedChain = false
     }
 
-    private fun trackingIssueAlert(nowMillis: Long, force: Boolean = false): TrackingAlert? {
-        if (trackingIssueAnnounced ||
-            (!force && nowMillis - trackingIssueStartedAtMillis < config.trackingAlertDelayMillis)
-        ) {
-            return null
+    private fun observeUnhealthyTracking(issue: TrackingIssue, nowMillis: Long): TrackingAlert? {
+        trackingRecoveryStartedAtMillis = 0L
+        trackingRecoverySamples = 0
+        if (alertEpisodeIssue == null) {
+            alertEpisodeIssue = issue
+            alertEpisodeStartedAtMillis = nowMillis
+        } else if (!alertEpisodeAnnounced) {
+            alertEpisodeIssue = issue
         }
-        trackingIssueAnnounced = true
-        return when (trackingIssue) {
+        if (alertEpisodeAnnounced ||
+            nowMillis - alertEpisodeStartedAtMillis < config.trackingAlertDelayMillis ||
+            (lastTrackingAlertAtMillis != 0L &&
+                nowMillis - lastTrackingAlertAtMillis < config.trackingAlertMinIntervalMillis)
+        ) return null
+
+        alertEpisodeAnnounced = true
+        lastTrackingAlertAtMillis = nowMillis
+        return when (alertEpisodeIssue) {
             TrackingIssue.HighSpeed -> TrackingAlert.HighSpeedStarted
             TrackingIssue.LocationJump -> TrackingAlert.LocationJumpStarted
             null -> null
         }
     }
 
-    private fun finishTrackingIssueIfNeeded(): TrackingAlert? {
-        val alert = if (trackingIssueAnnounced) TrackingAlert.Recovered else null
-        clearTrackingIssue()
+    private fun observeHealthyTracking(nowMillis: Long): TrackingAlert? {
+        clearRejectedChain()
+        if (alertEpisodeIssue == null) return null
+        if (trackingRecoveryStartedAtMillis == 0L) trackingRecoveryStartedAtMillis = nowMillis
+        trackingRecoverySamples++
+        val recovered = nowMillis - trackingRecoveryStartedAtMillis >= config.trackingRecoveryDurationMillis &&
+            trackingRecoverySamples >= config.trackingRecoveryMinSamples
+        if (!recovered) return null
+
+        val alert = if (alertEpisodeAnnounced) TrackingAlert.Recovered else null
+        clearAlertEpisode()
         return alert
     }
 
     private fun clearTrackingIssue() {
+        clearRejectedChain()
+        clearAlertEpisode()
+        lastTrackingAlertAtMillis = 0L
+    }
+
+    private fun clearRejectedChain() {
         trackingIssue = null
-        trackingIssueStartedAtMillis = 0L
-        trackingIssueAnnounced = false
         rejectedChainStart = null
         rejectedChainLast = null
         rejectedChainSamples = 0
         followingRejectedChain = false
+    }
+
+    private fun clearAlertEpisode() {
+        alertEpisodeIssue = null
+        alertEpisodeStartedAtMillis = 0L
+        alertEpisodeAnnounced = false
+        trackingRecoveryStartedAtMillis = 0L
+        trackingRecoverySamples = 0
     }
 
     private fun updatePace(nowElapsedMillis: Long) {
@@ -377,6 +454,7 @@ class TrackingEngine(private val config: TrackingConfig = TrackingConfig()) {
 
     private fun clearStationaryLock() {
         stationaryDetected = false
+        stationaryCandidateStart = null
         resetStationaryConfirmation()
         stationaryAnchor = null
     }

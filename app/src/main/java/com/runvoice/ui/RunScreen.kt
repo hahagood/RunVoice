@@ -58,7 +58,7 @@ private val TextPrimary = Color(0xFFFFFFFF)
 private val TextSecondary = Color(0xFFB0BEC5)
 private val TextMuted = Color(0xFF7F8C99)
 
-private enum class RunSaveUiState { Ready, Saving, Saved, Failed }
+private enum class RunSaveUiState { Ready, Saving, Saved, PartiallySaved, Failed }
 
 @Composable
 fun RunScreen(
@@ -66,7 +66,8 @@ fun RunScreen(
     onStart: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
-    onSaveAndStop: suspend () -> TraceSaveResult,
+    onInterruptAndExit: () -> Unit,
+    onSaveTraceAndStop: suspend () -> TraceSaveResult,
     onDiscardAndStop: suspend () -> TraceSaveResult,
     onOpenHrSettings: () -> Unit,
     onOpenAbout: () -> Unit = {},
@@ -91,24 +92,54 @@ fun RunScreen(
             finishedAtMillis = stopConfirmAtMillis.takeIf { it > 0L } ?: System.currentTimeMillis(),
             saveState = saveState,
             saveError = saveError,
-            onSaveAndStop = {
+            onSaveRun = { finishedAtMillis ->
                 if (saveState != RunSaveUiState.Ready) return@StopRunConfirmScreen
                 saveState = RunSaveUiState.Saving
+                val summaryRunData = stopSummaryRunData ?: runData
+                val traceCsvPath = stopTraceCsvPath ?: currentTracePathForSnapshot()
                 scope.launch {
-                    when (val result = onSaveAndStop()) {
-                        is TraceSaveResult.Saved -> {
+                    val imageResult = withContext(Dispatchers.IO) {
+                        runCatching {
+                            imageSaver.saveSummary(summaryRunData, finishedAtMillis, traceCsvPath)
+                        }
+                    }
+                    val traceResult = onSaveTraceAndStop()
+                    val imageError = imageResult.exceptionOrNull()?.message ?: "未知错误"
+
+                    when {
+                        imageResult.isSuccess && traceResult is TraceSaveResult.Saved -> {
                             saveState = RunSaveUiState.Saved
                             saveError = null
-                            Toast.makeText(context, "本次数据已保存到 ${result.publicPath}", Toast.LENGTH_LONG).show()
+                            Toast.makeText(
+                                context,
+                                "摘要海报和轨迹数据均已保存",
+                                Toast.LENGTH_LONG
+                            ).show()
                         }
-                        is TraceSaveResult.Failed -> {
-                            saveState = RunSaveUiState.Failed
-                            saveError = result.message
-                            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                        imageResult.isSuccess && traceResult is TraceSaveResult.Failed -> {
+                            saveState = RunSaveUiState.PartiallySaved
+                            saveError = "摘要海报已保存；轨迹数据保存失败：${traceResult.message}"
+                            Toast.makeText(context, saveError, Toast.LENGTH_LONG).show()
                         }
-                        TraceSaveResult.Discarded -> {
+                        imageResult.isSuccess && traceResult is TraceSaveResult.Discarded -> {
+                            saveState = RunSaveUiState.PartiallySaved
+                            saveError = "摘要海报已保存，但没有生成轨迹文件"
+                            Toast.makeText(context, saveError, Toast.LENGTH_LONG).show()
+                        }
+                        imageResult.isFailure && traceResult is TraceSaveResult.Saved -> {
+                            saveState = RunSaveUiState.PartiallySaved
+                            saveError = "轨迹数据已保存；摘要海报保存失败：$imageError"
+                            Toast.makeText(context, saveError, Toast.LENGTH_LONG).show()
+                        }
+                        else -> {
                             saveState = RunSaveUiState.Failed
-                            saveError = "保存流程未生成轨迹文件"
+                            val traceError = when (traceResult) {
+                                is TraceSaveResult.Failed -> traceResult.message
+                                TraceSaveResult.Discarded -> "没有生成轨迹文件"
+                                is TraceSaveResult.Saved -> "未知错误"
+                            }
+                            saveError = "摘要海报保存失败：$imageError；轨迹数据保存失败：$traceError"
+                            Toast.makeText(context, saveError, Toast.LENGTH_LONG).show()
                         }
                     }
                 }
@@ -128,17 +159,6 @@ fun RunScreen(
                             Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
                         }
                     }
-                }
-            },
-            onSaveSnapshot = { finishedAtMillis ->
-                val traceCsvPath = stopTraceCsvPath ?: currentTracePathForSnapshot()
-                scope.launch {
-                    val message = withContext(Dispatchers.IO) {
-                        runCatching {
-                            imageSaver.saveSummary(stopSummaryRunData ?: runData, finishedAtMillis, traceCsvPath)
-                        }.getOrElse { "截图保存失败：${it.message ?: "未知错误"}" }
-                    }
-                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                 }
             }
         )
@@ -225,49 +245,69 @@ fun RunScreen(
                 }
             }
             runData.isPaused -> {
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Button(
-                        onClick = {
-                            stopConfirmAtMillis = System.currentTimeMillis()
-                            stopSummaryRunData = runData
-                            stopTraceCsvPath = currentTracePathForSnapshot()
-                            saveState = RunSaveUiState.Ready
-                            saveError = null
-                            showStopConfirm = true
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(72.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = AccentRed),
-                        shape = RoundedCornerShape(16.dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        Text(
-                            "⏹  结束本次",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Button(
+                            onClick = {
+                                stopConfirmAtMillis = System.currentTimeMillis()
+                                stopSummaryRunData = runData
+                                stopTraceCsvPath = currentTracePathForSnapshot()
+                                saveState = RunSaveUiState.Ready
+                                saveError = null
+                                showStopConfirm = true
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(72.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = AccentRed),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Text(
+                                "⏹  结束本次",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Button(
+                            onClick = onResume,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(72.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Text(
+                                "▶  继续跑步",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = BgColor,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
-                    Button(
-                        onClick = onResume,
+                    OutlinedButton(
+                        onClick = onInterruptAndExit,
                         modifier = Modifier
-                            .weight(1f)
-                            .height(72.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
-                        shape = RoundedCornerShape(16.dp)
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
+                        shape = RoundedCornerShape(14.dp)
                     ) {
                         Text(
-                            "▶  继续跑步",
-                            fontSize = 18.sp,
+                            "暂存本次跑步并退出",
+                            fontSize = 16.sp,
                             fontWeight = FontWeight.Bold,
-                            color = BgColor,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            maxLines = 1
                         )
                     }
                 }
@@ -294,9 +334,8 @@ private fun StopRunConfirmScreen(
     finishedAtMillis: Long,
     saveState: RunSaveUiState,
     saveError: String?,
-    onSaveAndStop: () -> Unit,
-    onExit: () -> Unit,
-    onSaveSnapshot: (Long) -> Unit
+    onSaveRun: (Long) -> Unit,
+    onExit: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -319,31 +358,18 @@ private fun StopRunConfirmScreen(
         StopRunHintCard(
             title = "请选择如何处理本次记录",
             body = when (saveState) {
-                RunSaveUiState.Saved -> "本次跑步数据已保存。你还可以继续把当前摘要保存为本地截图，完成后返回首页。"
-                RunSaveUiState.Saving -> "正在保存轨迹并导出到公共 Documents 目录，请稍候。"
+                RunSaveUiState.Saved -> "数据摘要海报和轨迹数据均已保存，可以返回首页。"
+                RunSaveUiState.Saving -> "正在生成摘要海报并导出轨迹数据，请稍候。"
+                RunSaveUiState.PartiallySaved -> saveError ?: "本次记录仅部分保存，请检查系统提示。"
                 RunSaveUiState.Failed -> saveError ?: "保存失败；应用内轨迹副本可能仍然保留。"
-                RunSaveUiState.Ready -> "建议先保存截图，再保存本次跑步数据；如果不想保留本次记录，也可以直接返回首页。"
+                RunSaveUiState.Ready -> "一次操作即可同时保存数据摘要海报和轨迹数据；如果不想保留本次记录，也可以直接返回首页。"
             }
         )
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        FilledTonalButton(
-            onClick = { onSaveSnapshot(finishedAtMillis) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp),
-            colors = ButtonDefaults.filledTonalButtonColors(
-                containerColor = CardColor,
-                contentColor = AccentYellow
-            ),
-            shape = RoundedCornerShape(14.dp)
-        ) {
-            Text("保存截图", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        }
-
         Button(
-            onClick = onSaveAndStop,
+            onClick = { onSaveRun(finishedAtMillis) },
             enabled = saveState == RunSaveUiState.Ready,
             modifier = Modifier
                 .fillMaxWidth()
@@ -357,9 +383,10 @@ private fun StopRunConfirmScreen(
         ) {
             Text(
                 when (saveState) {
-                    RunSaveUiState.Ready -> "保存数据"
+                    RunSaveUiState.Ready -> "保存海报和轨迹"
                     RunSaveUiState.Saving -> "正在保存…"
-                    RunSaveUiState.Saved -> "数据已保存"
+                    RunSaveUiState.Saved -> "海报和轨迹已保存"
+                    RunSaveUiState.PartiallySaved -> "部分内容已保存"
                     RunSaveUiState.Failed -> "保存失败"
                 },
                 fontSize = 20.sp,

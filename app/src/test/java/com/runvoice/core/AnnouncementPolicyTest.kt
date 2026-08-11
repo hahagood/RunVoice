@@ -25,4 +25,13 @@ class AnnouncementPolicyTest {
         policy.reset()
         assertEquals(listOf(AnnouncementEvent.Kilometer(1)), policy.eventsFor(1_000f, 360))
     }
+
+    @Test fun restoreDoesNotReplayEarlierDistanceAnnouncements() {
+        val policy = AnnouncementPolicy()
+        policy.restore(2_350f)
+
+        assertTrue(policy.eventsFor(2_360f, 360).isEmpty())
+        assertEquals(listOf(AnnouncementEvent.CurrentPace(360)), policy.eventsFor(2_500f, 360))
+        assertEquals(listOf(AnnouncementEvent.Kilometer(3)), policy.eventsFor(3_000f, 360))
+    }
 }

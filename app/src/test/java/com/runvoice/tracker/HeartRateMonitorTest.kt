@@ -18,4 +18,13 @@ class HeartRateMonitorTest {
         assertNull(HeartRateMonitor.parseHeartRate(byteArrayOf(0)))
         assertNull(HeartRateMonitor.parseHeartRate(byteArrayOf(1, 44)))
     }
+
+    @Test fun reconnectBackoffCapsAtThirtySeconds() {
+        assertEquals(2_000L, HeartRateMonitor.reconnectDelayMillis(0))
+        assertEquals(5_000L, HeartRateMonitor.reconnectDelayMillis(1))
+        assertEquals(10_000L, HeartRateMonitor.reconnectDelayMillis(2))
+        assertEquals(20_000L, HeartRateMonitor.reconnectDelayMillis(3))
+        assertEquals(30_000L, HeartRateMonitor.reconnectDelayMillis(4))
+        assertEquals(30_000L, HeartRateMonitor.reconnectDelayMillis(20))
+    }
 }

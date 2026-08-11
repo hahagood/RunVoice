@@ -22,8 +22,11 @@ import com.runvoice.core.RunSessionController
 import com.runvoice.core.RunSessionState
 import com.runvoice.core.AnnouncementEvent
 import com.runvoice.core.AnnouncementPolicy
+import com.runvoice.core.HeartRateAlertPolicy
 import com.runvoice.core.TrackingAlert
 import com.runvoice.model.RunData
+import com.runvoice.recovery.RunCheckpoint
+import com.runvoice.recovery.RunCheckpointStore
 import com.runvoice.tracker.GpsTracker
 import com.runvoice.tracker.HeartRateMonitor
 import com.runvoice.tracker.HeartRateState
@@ -32,10 +35,13 @@ import com.runvoice.tracker.RunTimer
 import com.runvoice.tracker.TraceSaveResult
 import com.runvoice.voice.Metronome
 import com.runvoice.voice.VoiceAnnouncer
+import com.runvoice.voice.VoiceStatsText
 import java.util.Calendar
 import java.util.Locale
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class RunningService : Service() {
 
@@ -44,13 +50,18 @@ class RunningService : Service() {
         const val CHANNEL_ID = "running_channel"
         const val NOTIFICATION_ID = 1
         const val ACTION_START = "com.runvoice.START"
+        const val ACTION_START_NEW = "com.runvoice.START_NEW"
+        const val ACTION_CONTINUE_PREVIOUS = "com.runvoice.CONTINUE_PREVIOUS"
         const val ACTION_PAUSE = "com.runvoice.PAUSE"
         const val ACTION_RESUME = "com.runvoice.RESUME"
+        const val ACTION_INTERRUPT_FOR_RECOVERY = "com.runvoice.INTERRUPT_FOR_RECOVERY"
         const val ACTION_STOP = "com.runvoice.STOP"
         const val ACTION_TEST_ANNOUNCE = "com.runvoice.TEST_ANNOUNCE"
         const val ACTION_HANDLE_MEDIA_BUTTON = "com.runvoice.HANDLE_MEDIA_BUTTON"
-        private const val STATIONARY_PROMPT_DELAY_MS = 5_000L
+        private const val STATIONARY_PROMPT_DELAY_MS = 0L
         private const val STATIONARY_PROMPT_MIN_INTERVAL_MS = 60_000L
+        private const val HEART_RATE_DISCONNECT_PROMPT_DELAY_MS = 5_000L
+        private const val CHECKPOINT_INTERVAL_SECONDS = 5L
     }
 
     inner class RunBinder : Binder() {
@@ -61,7 +72,10 @@ class RunningService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val sessionController = RunSessionController()
     private val announcementPolicy = AnnouncementPolicy()
+    private val heartRateAlertPolicy = HeartRateAlertPolicy()
+    private val checkpointMutex = Mutex()
     private lateinit var prefs: SharedPreferences
+    private lateinit var checkpointStore: RunCheckpointStore
 
     private lateinit var gpsTracker: GpsTracker
     private lateinit var heartRateMonitor: HeartRateMonitor
@@ -72,6 +86,10 @@ class RunningService : Service() {
 
     private val _runData = MutableStateFlow(RunData())
     val runData: StateFlow<RunData> = _runData.asStateFlow()
+    private val _recoveryInProgress = MutableStateFlow(false)
+    val recoveryInProgress: StateFlow<Boolean> = _recoveryInProgress.asStateFlow()
+    private val _recoveryError = MutableStateFlow<String?>(null)
+    val recoveryError: StateFlow<String?> = _recoveryError.asStateFlow()
     val heartRateState: StateFlow<HeartRateState> get() = heartRateMonitor.state
     val heartRateScanning: StateFlow<Boolean> get() = heartRateMonitor.scanning
     val heartRateDevices: StateFlow<List<HeartRateMonitor.BleDevice>> get() = heartRateMonitor.discoveredDevices
@@ -79,18 +97,25 @@ class RunningService : Service() {
     private var collectJob: Job? = null
     private var stationaryPromptJob: Job? = null
     private var trackerEventJob: Job? = null
+    private var heartRateConnectionPromptJob: Job? = null
     private var preRunHrJob: Job? = null
     private var maxHeartRate = 0
     private var mediaSession: MediaSession? = null
     private var lastMediaButtonHandledAt = 0L
     private var lastStationaryPromptAt = 0L
     private var lastLapElapsedSeconds = 0L
+    private var sessionStartedAtEpochMillis = 0L
+    private var lastCheckpointElapsedSeconds = -CHECKPOINT_INTERVAL_SECONDS
+    private var lastCheckpointWrittenElapsedSeconds = -1L
+    @Volatile
+    private var checkpointGeneration = 0L
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         mediaSession = buildMediaSession()
         prefs = getSharedPreferences("runvoice", MODE_PRIVATE)
+        checkpointStore = RunCheckpointStore(this)
         motionDetector = MotionDetector(this)
         gpsTracker = GpsTracker(this, motionDetector)
         heartRateMonitor = HeartRateMonitor(this)
@@ -103,7 +128,7 @@ class RunningService : Service() {
         metronome = Metronome()
         // Restore saved metronome BPM and auto-start if was active
         metronome.setBpm(prefs.getInt("metronome_bpm", 180))
-        if (prefs.getBoolean("metronome_active", false)) {
+        if (prefs.getBoolean("metronome_active", false) && checkpointStore.load() == null) {
             metronome.start()
         }
         // Auto-connect saved HR device on service creation
@@ -116,8 +141,15 @@ class RunningService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> startRun()
+            ACTION_START_NEW -> {
+                if (!hasActiveRunSession() && !_recoveryInProgress.value) {
+                    if (discardRecoverableRun()) startRun()
+                }
+            }
+            ACTION_CONTINUE_PREVIOUS -> continuePreviousRun()
             ACTION_PAUSE -> pauseRun()
             ACTION_RESUME -> resumeRun()
+            ACTION_INTERRUPT_FOR_RECOVERY -> interruptForRecovery()
             ACTION_STOP -> serviceScope.launch { stopRun() }
             ACTION_HANDLE_MEDIA_BUTTON,
             Intent.ACTION_MEDIA_BUTTON -> dispatchMediaButtonIntent(intent)
@@ -131,17 +163,26 @@ class RunningService : Service() {
                 )
             }
         }
-        // A run is intentionally not recreated without a persisted checkpoint.
         return START_NOT_STICKY
     }
 
     private fun startRun() {
+        if (checkpointStore.load() != null) {
+            _recoveryError.value = "检测到未完成的跑步，请先选择继续上次跑步或开始新记录"
+            return
+        }
         if (!sessionController.dispatch(RunCommand.Start).accepted) {
             Log.w(TAG, "Ignoring Start in ${sessionController.state}")
             return
         }
+        _recoveryError.value = null
+        checkpointGeneration++
+        sessionStartedAtEpochMillis = System.currentTimeMillis()
+        lastCheckpointElapsedSeconds = -CHECKPOINT_INTERVAL_SECONDS
+        lastCheckpointWrittenElapsedSeconds = -1L
         preRunHrJob?.cancel()
         announcementPolicy.reset()
+        heartRateAlertPolicy.reset()
         lastLapElapsedSeconds = 0L
         maxHeartRate = heartRateMonitor.heartRate.value.coerceAtLeast(0)
         _runData.value = RunData(
@@ -166,6 +207,7 @@ class RunningService : Service() {
             Log.e(TAG, "Unable to start GPS tracking", gpsStart.exceptionOrNull())
             runTimer.reset()
             gpsTracker.stop(saveSession = false)
+            checkpointGeneration++
             sessionController.dispatch(RunCommand.BeginFinish)
             sessionController.dispatch(RunCommand.CompleteFinish)
             _runData.update { it.copy(isRunning = false, isPaused = false) }
@@ -184,7 +226,152 @@ class RunningService : Service() {
         startCollecting()
         startTrackerEventObservation()
         startStationaryPromptObservation()
+        startHeartRateConnectionPromptObservation()
+        persistCheckpoint(force = true)
         voiceAnnouncer.speak("开始跑步")
+    }
+
+    private fun continuePreviousRun() {
+        if (_recoveryInProgress.value || hasActiveRunSession()) return
+        val checkpoint = checkpointStore.load()
+        if (checkpoint == null) {
+            _recoveryError.value = "没有找到可以继续的跑步记录"
+            return
+        }
+        if (!sessionController.dispatch(RunCommand.Start).accepted) {
+            _recoveryError.value = "当前状态不能继续上次跑步"
+            return
+        }
+
+        _recoveryInProgress.value = true
+        _recoveryError.value = null
+        checkpointGeneration++
+        preRunHrJob?.cancel()
+        sessionStartedAtEpochMillis = checkpoint.startedAtEpochMillis
+        lastCheckpointElapsedSeconds = checkpoint.elapsedSeconds
+        lastCheckpointWrittenElapsedSeconds = -1L
+        lastLapElapsedSeconds = checkpoint.lastLapElapsedSeconds
+        maxHeartRate = checkpoint.maxHeartRate
+        announcementPolicy.restore(checkpoint.distanceMeters)
+        heartRateAlertPolicy.reset()
+        runTimer.restore(checkpoint.elapsedSeconds)
+        if (prefs.getBoolean("metronome_active", false)) metronome.start()
+        _runData.value = RunData(
+            elapsedSeconds = checkpoint.elapsedSeconds,
+            heartRate = heartRateMonitor.heartRate.value,
+            maxHeartRate = checkpoint.maxHeartRate,
+            distanceMeters = checkpoint.distanceMeters,
+            paceSecondsPerKm = 0,
+            isRunning = true,
+            isPaused = false,
+            hrDeviceConnected = heartRateMonitor.connected.value,
+            metronomeActive = metronome.isPlaying.value,
+            metronomeBpm = metronome.bpm.value
+        )
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                buildNotification("正在恢复上次跑步"),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, buildNotification("正在恢复上次跑步"))
+        }
+
+        serviceScope.launch {
+            val recovery = runCatching {
+                withContext(Dispatchers.IO) {
+                    gpsTracker.prepareRecovery(checkpoint.tracePath)
+                }
+            }.getOrElse { failure ->
+                failRunRecovery("无法读取上次轨迹：${failure.message ?: "未知错误"}")
+                return@launch
+            }
+            val restoredDistance = maxOf(checkpoint.distanceMeters, recovery.totalDistanceMeters)
+            maxHeartRate = maxOf(checkpoint.maxHeartRate, recovery.maxHeartRate)
+            announcementPolicy.restore(restoredDistance)
+            _runData.update {
+                it.copy(distanceMeters = restoredDistance, maxHeartRate = maxHeartRate)
+            }
+
+            val gpsRestore = gpsTracker.startRecovered(recovery, restoredDistance)
+            if (gpsRestore.isFailure) {
+                gpsTracker.closeTraceForRecovery()
+                failRunRecovery("无法恢复定位：${gpsRestore.exceptionOrNull()?.message ?: "未知错误"}")
+                return@launch
+            }
+
+            runTimer.start(serviceScope)
+            motionDetector.start()
+            if (!heartRateMonitor.connected.value) heartRateMonitor.connectSavedDevice()
+            startCollecting()
+            startTrackerEventObservation()
+            startStationaryPromptObservation()
+            startHeartRateConnectionPromptObservation()
+            updateMediaSession(active = true, paused = false)
+            updateNotification("已续跑 ${_runData.value.timeFormatted} · ${_runData.value.distanceFormatted}km")
+            _recoveryInProgress.value = false
+            persistCheckpoint(force = true)
+            voiceAnnouncer.speak("已继续上次跑步")
+        }
+    }
+
+    private fun failRunRecovery(message: String) {
+        Log.w(TAG, message)
+        checkpointGeneration++
+        runTimer.reset()
+        gpsTracker.stopUpdates()
+        motionDetector.stop()
+        sessionController.dispatch(RunCommand.BeginFinish)
+        sessionController.dispatch(RunCommand.CompleteFinish)
+        _runData.update { it.copy(isRunning = false, isPaused = false) }
+        updateMediaSession(active = false, paused = false)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        startPreRunHrObservation()
+        _recoveryInProgress.value = false
+        _recoveryError.value = message
+    }
+
+    private fun discardRecoverableRun(): Boolean {
+        val checkpoint = checkpointStore.load()
+        if (checkpoint != null) {
+            val discarded = runCatching {
+                gpsTracker.discardRecoveredTrace(checkpoint.tracePath)
+            }.onFailure {
+                Log.w(TAG, "Unable to delete interrupted trace", it)
+            }.getOrDefault(false)
+            if (!discarded) {
+                _recoveryError.value = "无法删除上次轨迹，请检查存储空间后重试"
+                return false
+            }
+        }
+        checkpointGeneration++
+        checkpointStore.clear()
+        prefs.edit().putBoolean("metronome_active", false).apply()
+        _recoveryError.value = null
+        return true
+    }
+
+    private fun interruptForRecovery() {
+        if (!hasActiveRunSession()) return
+        if (sessionController.state == RunSessionState.Running) {
+            sessionController.dispatch(RunCommand.Pause)
+            runTimer.pause()
+        }
+        collectJob?.cancel()
+        stationaryPromptJob?.cancel()
+        trackerEventJob?.cancel()
+        heartRateConnectionPromptJob?.cancel()
+        heartRateAlertPolicy.reset()
+        _runData.update { it.copy(isPaused = true) }
+        persistCheckpointSynchronously()
+        gpsTracker.stopUpdates()
+        motionDetector.stop()
+        gpsTracker.closeTraceForRecovery()
+        updateMediaSession(active = false, paused = true)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun pauseRun() {
@@ -193,10 +380,12 @@ class RunningService : Service() {
             return
         }
         runTimer.pause()
+        heartRateAlertPolicy.reset()
         gpsTracker.pause()
         motionDetector.stop()
         stationaryPromptJob?.cancel()
         _runData.update { it.copy(isPaused = true) }
+        persistCheckpoint(force = true)
         updateMediaSession(active = true, paused = true)
         updateNotification("已暂停")
         voiceAnnouncer.speak("已暂停")
@@ -208,6 +397,7 @@ class RunningService : Service() {
             return
         }
         runTimer.start(serviceScope)
+        heartRateAlertPolicy.reset()
         val gpsResume = gpsTracker.resume()
         if (gpsResume.isFailure) {
             Log.e(TAG, "Unable to resume GPS tracking", gpsResume.exceptionOrNull())
@@ -220,6 +410,7 @@ class RunningService : Service() {
         motionDetector.start()
         startStationaryPromptObservation()
         _runData.update { it.copy(isPaused = false) }
+        persistCheckpoint(force = true)
         updateMediaSession(active = true, paused = false)
         voiceAnnouncer.speak("继续跑步")
     }
@@ -229,6 +420,9 @@ class RunningService : Service() {
             Log.w(TAG, "Ignoring Finish in ${sessionController.state}")
             return TraceSaveResult.Failed("当前状态不能结束跑步")
         }
+        // Invalidate every checkpoint task captured by this session before closing the trace.
+        // The mutex then waits for an already-running write and guarantees that clear() is last.
+        checkpointGeneration++
         val data = _runData.value
         if (saveSession) {
             val km = data.distanceKm
@@ -238,13 +432,19 @@ class RunningService : Service() {
         }
 
         collectJob?.cancel()
+        heartRateAlertPolicy.reset()
         stationaryPromptJob?.cancel()
         trackerEventJob?.cancel()
+        heartRateConnectionPromptJob?.cancel()
         runTimer.reset()
         gpsTracker.stopUpdates()
         motionDetector.stop()
         val saveResult = withContext(Dispatchers.IO) {
-            gpsTracker.closeTrace(saveSession = saveSession)
+            checkpointMutex.withLock {
+                gpsTracker.closeTrace(saveSession = saveSession).also {
+                    checkpointStore.clear()
+                }
+            }
         }
         // Keep HR monitor connected — don't disconnect
 
@@ -297,6 +497,21 @@ class RunningService : Service() {
             }.collect { data ->
                 _runData.value = data
 
+                val shouldAlertHighHeartRate = if (data.hrDeviceConnected && !data.isPaused) {
+                    heartRateAlertPolicy.shouldAlert(
+                        heartRateBpm = data.heartRate,
+                        nowMillis = SystemClock.elapsedRealtime()
+                    )
+                } else {
+                    heartRateAlertPolicy.reset()
+                    false
+                }
+                if (shouldAlertHighHeartRate) {
+                    voiceAnnouncer.speakPriority(
+                        "心率持续超过一百八十，请立即减速，注意身体状况"
+                    )
+                }
+
                 announcementPolicy.eventsFor(data.distanceMeters, data.paceSecondsPerKm).forEach { event ->
                     when (event) {
                         is AnnouncementEvent.Kilometer -> voiceAnnouncer.announceKilometer(
@@ -305,7 +520,10 @@ class RunningService : Service() {
                             heartRate = data.heartRate,
                             paceSecondsPerKm = data.paceSecondsPerKm
                         )
-                        is AnnouncementEvent.CurrentPace -> voiceAnnouncer.announceCurrentPace(event.paceSecondsPerKm)
+                        is AnnouncementEvent.CurrentPace -> voiceAnnouncer.announceQuarterStats(
+                            paceSecondsPerKm = event.paceSecondsPerKm,
+                            heartRate = data.heartRate,
+                        )
                     }
                 }
 
@@ -313,6 +531,7 @@ class RunningService : Service() {
                 if (data.elapsedSeconds % 5 == 0L) {
                     updateNotification("跑步中 ${data.timeFormatted} · ${data.distanceFormatted}km")
                 }
+                persistCheckpoint()
             }
         }
     }
@@ -365,9 +584,9 @@ class RunningService : Service() {
                     val data = _runData.value
                     if (!data.isRunning || data.isPaused) return@collect
                     val prompt = when (alert) {
-                        TrackingAlert.HighSpeedStarted -> "检测到速度超过跑步范围，距离记录暂时中断"
-                        TrackingAlert.LocationJumpStarted -> "定位发生跳点，距离记录暂时中断"
-                        TrackingAlert.Recovered -> "定位已恢复，继续记录距离"
+                        TrackingAlert.HighSpeedStarted,
+                        TrackingAlert.LocationJumpStarted -> "GPS信号不稳定，正在校正距离"
+                        TrackingAlert.Recovered -> "GPS信号已稳定，继续记录距离"
                     }
                     voiceAnnouncer.speakPriority(prompt)
                 }
@@ -379,6 +598,7 @@ class RunningService : Service() {
                     val elapsed = runTimer.elapsedSeconds.value
                     val lapElapsed = (elapsed - lastLapElapsedSeconds).coerceAtLeast(0L)
                     lastLapElapsedSeconds = elapsed
+                    persistCheckpoint(force = true)
                     val averagePace = if (lap.lapDistanceMeters > 0f && lapElapsed > 0L) {
                         (lapElapsed * 1_000f / lap.lapDistanceMeters).toInt()
                     } else {
@@ -389,6 +609,31 @@ class RunningService : Service() {
                         distanceMeters = lap.lapDistanceMeters,
                         averagePaceSecondsPerKm = averagePace
                     )
+                }
+            }
+        }
+    }
+
+    private fun startHeartRateConnectionPromptObservation() {
+        heartRateConnectionPromptJob?.cancel()
+        heartRateConnectionPromptJob = serviceScope.launch {
+            var hasConnectedDuringSession = heartRateMonitor.connected.value
+            var disconnectAnnounced = false
+            heartRateMonitor.connected.collectLatest { connected ->
+                if (connected) {
+                    hasConnectedDuringSession = true
+                    if (disconnectAnnounced && _runData.value.isRunning) {
+                        disconnectAnnounced = false
+                        voiceAnnouncer.speakPriority("心率带已恢复")
+                    }
+                    return@collectLatest
+                }
+                if (!hasConnectedDuringSession) return@collectLatest
+
+                delay(HEART_RATE_DISCONNECT_PROMPT_DELAY_MS)
+                if (!heartRateMonitor.connected.value && _runData.value.isRunning) {
+                    disconnectAnnounced = true
+                    voiceAnnouncer.speakPriority("心率带已断开，正在重连")
                 }
             }
         }
@@ -519,14 +764,14 @@ class RunningService : Service() {
             add("当前已跑${data.distanceFormatted}公里")
             add("用时${formatTimeForSpeech(data.elapsedSeconds)}")
             if (data.heartRate > 0) {
-                add("当前心率${data.heartRate}")
+                add("心率：${VoiceStatsText.heartRate(data.heartRate)}")
             }
             if (data.maxHeartRate > 0) {
-                add("最大心率${data.maxHeartRate}")
+                add("最大心率：${VoiceStatsText.heartRate(data.maxHeartRate)}")
             }
             val averagePaceSecondsPerKm = data.averagePaceSecondsPerKm
             if (averagePaceSecondsPerKm > 0) {
-                add("平均配速${formatPaceForSpeech(averagePaceSecondsPerKm)}")
+                add("平均配速：${VoiceStatsText.pace(averagePaceSecondsPerKm)}")
             }
             if (data.isPaused) {
                 add("当前已暂停")
@@ -556,12 +801,6 @@ class RunningService : Service() {
         val hour = now.get(Calendar.HOUR_OF_DAY)
         val minute = now.get(Calendar.MINUTE)
         return "${hour}点${minute}分"
-    }
-
-    private fun formatPaceForSpeech(secondsPerKm: Int): String {
-        val min = secondsPerKm / 60
-        val sec = secondsPerKm % 60
-        return "${min}分${sec}秒每公里"
     }
 
     private fun extractMediaKeyEvent(intent: Intent): KeyEvent? {
@@ -659,6 +898,61 @@ class RunningService : Service() {
         return gpsTracker.currentTracePath()
     }
 
+    private fun persistCheckpoint(force: Boolean = false) {
+        if (!hasActiveRunSession()) return
+        val data = _runData.value
+        if (!force &&
+            data.elapsedSeconds - lastCheckpointElapsedSeconds < CHECKPOINT_INTERVAL_SECONDS
+        ) {
+            return
+        }
+        val checkpoint = buildCheckpoint(data) ?: return
+        val generation = checkpointGeneration
+        lastCheckpointElapsedSeconds = data.elapsedSeconds
+        serviceScope.launch(Dispatchers.IO) {
+            runCatching {
+                checkpointMutex.withLock {
+                    if (generation != checkpointGeneration || !hasActiveRunSession()) {
+                        return@withLock
+                    }
+                    if (checkpoint.elapsedSeconds < lastCheckpointWrittenElapsedSeconds) return@withLock
+                    check(gpsTracker.flushTrace()) { "GPS trace flush failed" }
+                    checkpointStore.save(checkpoint)
+                    lastCheckpointWrittenElapsedSeconds = checkpoint.elapsedSeconds
+                }
+            }.onFailure { Log.w(TAG, "Unable to persist recovery checkpoint", it) }
+        }
+    }
+
+    private fun persistCheckpointSynchronously() {
+        if (!hasActiveRunSession()) return
+        val checkpoint = buildCheckpoint(_runData.value) ?: return
+        runCatching {
+            runBlocking {
+                checkpointMutex.withLock {
+                    check(gpsTracker.flushTrace()) { "GPS trace flush failed" }
+                    checkpointStore.save(checkpoint)
+                    lastCheckpointWrittenElapsedSeconds = checkpoint.elapsedSeconds
+                }
+            }
+        }.onFailure { Log.w(TAG, "Unable to persist final recovery checkpoint", it) }
+    }
+
+    private fun buildCheckpoint(data: RunData): RunCheckpoint? {
+        val tracePath = gpsTracker.currentTracePath() ?: return null
+        val startedAt = sessionStartedAtEpochMillis.takeIf { it > 0L } ?: return null
+        return RunCheckpoint(
+            tracePath = tracePath,
+            startedAtEpochMillis = startedAt,
+            updatedAtEpochMillis = System.currentTimeMillis().coerceAtLeast(startedAt),
+            elapsedSeconds = data.elapsedSeconds,
+            distanceMeters = data.distanceMeters.coerceAtLeast(0f),
+            maxHeartRate = data.maxHeartRate.coerceAtLeast(0),
+            lastLapElapsedSeconds = lastLapElapsedSeconds.coerceIn(0L, data.elapsedSeconds),
+            wasPaused = data.isPaused
+        )
+    }
+
     override fun onTaskRemoved(rootIntent: Intent?) {
         if (hasActiveRunSession()) {
             Log.w(TAG, "Running task removed; proactively reconnecting TTS without stopping tracking")
@@ -672,15 +966,24 @@ class RunningService : Service() {
             sessionController.state == RunSessionState.Paused
 
     override fun onDestroy() {
+        val preserveInterruptedRun = hasActiveRunSession()
+        if (preserveInterruptedRun) {
+            persistCheckpointSynchronously()
+            gpsTracker.stopUpdates()
+            motionDetector.stop()
+            gpsTracker.closeTraceForRecovery()
+        }
         mediaSession?.release()
         mediaSession = null
         serviceScope.cancel()
         voiceAnnouncer.shutdown()
         metronome.release()
-        gpsTracker.stop(saveSession = false)
+        if (!preserveInterruptedRun) gpsTracker.stop(saveSession = false)
         heartRateMonitor.disconnect()
-        // Clear metronome active flag so it won't auto-restart if system recreates the service
-        prefs.edit().putBoolean("metronome_active", false).apply()
+        if (!preserveInterruptedRun) {
+            // A completed session must not restart the metronome with a later idle service.
+            prefs.edit().putBoolean("metronome_active", false).apply()
+        }
         super.onDestroy()
     }
 }

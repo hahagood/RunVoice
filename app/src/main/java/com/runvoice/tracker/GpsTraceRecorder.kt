@@ -14,7 +14,7 @@ import androidx.core.content.ContextCompat
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileWriter
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -32,26 +32,28 @@ class GpsTraceRecorder(private val context: Context) {
     }
 
     private var currentFile: File? = null
+    private var outputStream: FileOutputStream? = null
     private var writer: BufferedWriter? = null
 
-    fun startSession() {
+    @Synchronized
+    fun startSession(): String {
         if (currentFile != null) closeSession(save = false)
-        val baseDir = context.getExternalFilesDir("gps-traces") ?: File(context.filesDir, "gps-traces")
-        val dir = baseDir.apply { check(exists() || mkdirs()) { "Cannot create GPS trace directory" } }
+        val dir = traceDirectory()
         val timestamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val file = File(dir, "run-$timestamp.csv")
         currentFile = file
-        writer = BufferedWriter(FileWriter(file, false)).also {
-            it.write(
-                "timestamp,latitude,longitude,accuracy_m,speed_mps,bearing_deg,altitude_m," +
-                    "provider,motion_state,decision,reason,delta_m,total_distance_m,segment_distance_m," +
-                    "pace_sec_per_km,heart_rate,hr_connected\n"
-            )
+        outputStream = FileOutputStream(file, false)
+        writer = outputStream!!.bufferedWriter().also {
+            it.write(GPS_TRACE_CSV_HEADER)
+            it.newLine()
             it.flush()
+            syncOutputBestEffort()
         }
         Log.i(TAG, "GPS trace session started: ${file.absolutePath}")
+        return file.absolutePath
     }
 
+    @Synchronized
     fun record(
         location: Location,
         motionState: Boolean?,
@@ -81,18 +83,23 @@ class GpsTraceRecorder(private val context: Context) {
         }.onFailure { Log.w(TAG, "Failed to record GPS trace line", it) }
     }
 
-    fun flush() {
-        runCatching { writer?.flush() }
+    @Synchronized
+    fun flush(): Boolean {
+        val success = runCatching { writer?.flush() }
             .onFailure { Log.w(TAG, "Failed to flush GPS trace session", it) }
+            .isSuccess
+        if (success) syncOutputBestEffort()
+        return success
     }
 
+    @Synchronized
     fun closeSession(save: Boolean): TraceSaveResult {
         val file = currentFile ?: return TraceSaveResult.Discarded
-        val closeFailure = runCatching {
-            writer?.flush()
-            writer?.close()
-        }.exceptionOrNull()
+        val flushFailure = runCatching { writer?.flush() }.exceptionOrNull()
+        if (flushFailure == null) syncOutputBestEffort()
+        val closeFailure = runCatching { writer?.close() }.exceptionOrNull() ?: flushFailure
         writer = null
+        outputStream = null
         currentFile = null
         if (closeFailure != null) {
             Log.w(TAG, "Failed to close GPS trace session", closeFailure)
@@ -124,6 +131,40 @@ class GpsTraceRecorder(private val context: Context) {
         )
     }
 
+    @Synchronized
+    fun closeForRecovery() {
+        val flushResult = runCatching { writer?.flush() }
+            .onFailure { Log.w(TAG, "Failed to flush suspended GPS trace session", it) }
+        if (flushResult.isSuccess) syncOutputBestEffort()
+        runCatching { writer?.close() }
+            .onFailure { Log.w(TAG, "Failed to suspend GPS trace session", it) }
+        writer = null
+        outputStream = null
+        currentFile = null
+    }
+
+    @Synchronized
+    fun resumeSession(tracePath: String): TraceRecoveryData {
+        closeForRecovery()
+        val file = validatedSessionFile(tracePath)
+        check(file.isFile && file.length() > 0L) { "上次轨迹文件不存在或为空" }
+        val recovery = RecoveryTraceCsv.repairAndRead(file)
+
+        currentFile = file
+        outputStream = FileOutputStream(file, true)
+        writer = outputStream!!.bufferedWriter()
+        Log.i(TAG, "GPS trace session resumed: ${file.absolutePath}")
+        return recovery
+    }
+
+    @Synchronized
+    fun discardRecoveredSession(tracePath: String): Boolean {
+        val file = runCatching { validatedSessionFile(tracePath) }.getOrNull() ?: return false
+        if (currentFile?.canonicalPath == file.canonicalPath) closeForRecovery()
+        return !file.exists() || file.delete()
+    }
+
+    @Synchronized
     fun currentPath(): String? = currentFile?.absolutePath
 
     private fun savePublicCopyWithMediaStore(file: File): Result<String> = runCatching {
@@ -163,6 +204,23 @@ class GpsTraceRecorder(private val context: Context) {
         val target = File(dir, file.name)
         file.copyTo(target, overwrite = true)
         target.absolutePath
+    }
+
+    private fun traceDirectory(): File {
+        val baseDir = context.getExternalFilesDir("gps-traces") ?: File(context.filesDir, "gps-traces")
+        return baseDir.apply { check(exists() || mkdirs()) { "Cannot create GPS trace directory" } }
+    }
+
+    private fun validatedSessionFile(tracePath: String): File {
+        val directory = traceDirectory().canonicalFile
+        val file = File(tracePath).canonicalFile
+        check(file.parentFile == directory) { "上次轨迹路径不安全" }
+        return file
+    }
+
+    private fun syncOutputBestEffort() {
+        runCatching { outputStream?.fd?.sync() }
+            .onFailure { Log.w(TAG, "Unable to fsync GPS trace; buffered data was still flushed", it) }
     }
 
     private fun escape(value: String): String = "\"" + value.replace("\"", "\"\"") + "\""

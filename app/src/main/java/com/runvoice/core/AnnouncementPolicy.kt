@@ -15,6 +15,12 @@ class AnnouncementPolicy(private val quarterKilometerMeters: Int = 250) {
         lastQuarter = 0
     }
 
+    fun restore(distanceMeters: Float) {
+        require(distanceMeters.isFinite() && distanceMeters >= 0f)
+        lastKilometer = (distanceMeters / 1_000).toInt()
+        lastQuarter = (distanceMeters / quarterKilometerMeters).toInt()
+    }
+
     fun eventsFor(distanceMeters: Float, paceSecondsPerKm: Int): List<AnnouncementEvent> {
         val currentKilometer = (distanceMeters / 1_000).toInt()
         if (currentKilometer > lastKilometer && currentKilometer > 0) {

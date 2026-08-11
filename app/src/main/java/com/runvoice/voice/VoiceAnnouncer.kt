@@ -78,19 +78,27 @@ class VoiceAnnouncer(
      */
     fun announceKilometer(km: Int, elapsedSeconds: Long, heartRate: Int, paceSecondsPerKm: Int) {
         val timeText = formatElapsedTimeForSpeech(elapsedSeconds)
-        val paceText = if (paceSecondsPerKm > 0) "配速${formatPaceForSpeech(paceSecondsPerKm)}" else ""
-        val hrText = if (heartRate > 0) "，当前心率${heartRate}" else ""
+        val parts = buildList {
+            add("已跑${km}公里")
+            add("用时${timeText}")
+            if (heartRate > 0) add("心率：${VoiceStatsText.heartRate(heartRate)}")
+            if (paceSecondsPerKm > 0) add("配速：${VoiceStatsText.pace(paceSecondsPerKm)}")
+        }
         enqueueOrSpeak(
-            text = "已跑${km}公里，用时${timeText}${hrText}，${paceText}",
+            text = parts.joinToString("，"),
             utteranceId = uniqueUtteranceId("km_$km"),
         )
     }
 
-    fun announceCurrentPace(paceSecondsPerKm: Int) {
+    fun announceQuarterStats(paceSecondsPerKm: Int, heartRate: Int) {
         if (paceSecondsPerKm <= 0) return
+        val parts = buildList {
+            add("配速：${VoiceStatsText.pace(paceSecondsPerKm)}")
+            if (heartRate > 0) add("心率：${VoiceStatsText.heartRate(heartRate)}")
+        }
         enqueueOrSpeak(
-            "当前配速${formatPaceForSpeech(paceSecondsPerKm)}每公里",
-            uniqueUtteranceId("pace"),
+            parts.joinToString("，"),
+            uniqueUtteranceId("quarter_stats"),
         )
     }
 
@@ -104,7 +112,7 @@ class VoiceAnnouncer(
             "${String.format(Locale.CHINA, "%.2f", distanceMeters / 1_000f)}公里"
         }
         val paceText = if (averagePaceSecondsPerKm > 0) {
-            "平均配速${formatPaceForSpeech(averagePaceSecondsPerKm)}每公里，"
+            "平均配速：${VoiceStatsText.pace(averagePaceSecondsPerKm)}，"
         } else {
             ""
         }
@@ -500,12 +508,6 @@ class VoiceAnnouncer(
             if (minutes > 0) append("${minutes}分")
             append("${secs}秒")
         }
-    }
-
-    private fun formatPaceForSpeech(secondsPerKm: Int): String {
-        val minutes = secondsPerKm / 60
-        val seconds = secondsPerKm % 60
-        return "${minutes}分${seconds}秒"
     }
 
     private fun ordinalForSpeech(number: Int): String {

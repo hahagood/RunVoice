@@ -35,7 +35,7 @@ internal class RunSummaryImageStorage(private val context: Context) {
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
             check(resolver.update(uri, values, null, null) > 0) { "Unable to publish image" }
-            return "截图已保存到本地相册"
+            return "数据摘要海报已保存到本地相册"
         } catch (failure: Throwable) {
             uri?.let { runCatching { resolver.delete(it, null, null) } }
             throw failure
@@ -51,6 +51,6 @@ internal class RunSummaryImageStorage(private val context: Context) {
         FileOutputStream(file).use { output ->
             check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) { "PNG encoding failed" }
         }
-        return "截图已保存到 ${file.absolutePath}"
+        return "数据摘要海报已保存到 ${file.absolutePath}"
     }
 }

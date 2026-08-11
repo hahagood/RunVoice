@@ -94,12 +94,13 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
     }
 
     @SuppressLint("MissingPermission")
-    fun start(): Result<Unit> = runCatching {
+    fun start(): Result<String> = runCatching {
         engine.reset()
         lapDetector.reset()
         publishResetState()
-        traceRecorder.startSession()
+        val tracePath = traceRecorder.startSession()
         fusedClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
+        tracePath
     }
 
     fun pause() {
@@ -109,6 +110,7 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
     @SuppressLint("MissingPermission")
     fun resume(): Result<Unit> = runCatching {
         engine.resumeTracking()
+        _paceSecondsPerKm.value = 0
         _stationaryDetected.value = false
         fusedClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
     }
@@ -126,7 +128,28 @@ class GpsTracker(context: Context, private val motionDetector: MotionDetector? =
 
     fun closeTrace(saveSession: Boolean): TraceSaveResult = traceRecorder.closeSession(save = saveSession)
 
-    fun flushTrace() = traceRecorder.flush()
+    fun prepareRecovery(tracePath: String): TraceRecoveryData = traceRecorder.resumeSession(tracePath)
+
+    @SuppressLint("MissingPermission")
+    fun startRecovered(recovery: TraceRecoveryData, distanceMeters: Float): Result<Unit> = runCatching {
+        val restoredDistance = maxOf(distanceMeters, recovery.totalDistanceMeters)
+        engine.restoreDistance(restoredDistance)
+        lapDetector.reset()
+        recovery.acceptedPoints.forEach { point ->
+            lapDetector.process(point.latitude, point.longitude, point.totalDistanceMeters)
+        }
+        _distanceMeters.value = restoredDistance
+        _paceSecondsPerKm.value = 0
+        _stationaryDetected.value = false
+        fusedClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
+    }
+
+    fun closeTraceForRecovery() = traceRecorder.closeForRecovery()
+
+    fun discardRecoveredTrace(tracePath: String): Boolean =
+        traceRecorder.discardRecoveredSession(tracePath)
+
+    fun flushTrace(): Boolean = traceRecorder.flush()
 
     fun currentTracePath(): String? = traceRecorder.currentPath()
 

@@ -29,6 +29,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.runvoice.model.RunData
+import com.runvoice.recovery.RunCheckpointStore
 import com.runvoice.service.RunningService
 import com.runvoice.tracker.TraceSaveResult
 import com.runvoice.tracker.HeartRateState
@@ -112,12 +113,58 @@ class MainActivity : ComponentActivity() {
             val fallbackBool = remember { MutableStateFlow(false) }
             val fallbackDevices = remember { MutableStateFlow(emptyList<com.runvoice.tracker.HeartRateMonitor.BleDevice>()) }
             val fallbackHrState = remember { MutableStateFlow<HeartRateState>(HeartRateState.Idle) }
+            val fallbackRecovery = remember { MutableStateFlow(false) }
+            val fallbackRecoveryError = remember { MutableStateFlow<String?>(null) }
 
             val hrScanning by (service?.heartRateScanning ?: fallbackBool).collectAsStateWithLifecycle()
             val hrDevices by (service?.heartRateDevices ?: fallbackDevices).collectAsStateWithLifecycle()
             val hrState by (service?.heartRateState ?: fallbackHrState).collectAsStateWithLifecycle()
             val savedAddr = service?.savedHeartRateDeviceAddress()
             val hrConnected = runData.hrDeviceConnected
+            val recoveryInProgress by (
+                service?.recoveryInProgress ?: fallbackRecovery
+            ).collectAsStateWithLifecycle()
+            val recoveryError by (
+                service?.recoveryError ?: fallbackRecoveryError
+            ).collectAsStateWithLifecycle()
+            var pendingRecovery by remember {
+                mutableStateOf(RunCheckpointStore(applicationContext).load())
+            }
+
+            LaunchedEffect(runData.isRunning, recoveryInProgress) {
+                // Recovery marks the run active before the CSV has finished reopening. Keep the
+                // recovery card until that work succeeds so a read/start failure remains visible
+                // and can be retried instead of dropping the only way back to the checkpoint.
+                if (runData.isRunning && !recoveryInProgress) pendingRecovery = null
+            }
+
+            val checkpoint = pendingRecovery
+            if (service == null && checkpoint != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF1A1A2E)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(color = Color(0xFF00E676))
+                }
+                return@setContent
+            }
+            if (service != null && !runData.isRunning && checkpoint != null) {
+                RunRecoveryScreen(
+                    checkpoint = checkpoint,
+                    recoveryInProgress = recoveryInProgress,
+                    errorMessage = recoveryError,
+                    onContinue = {
+                        startForegroundServiceAction(RunningService.ACTION_CONTINUE_PREVIOUS)
+                    },
+                    onStartNew = {
+                        pendingRecovery = null
+                        startForegroundServiceAction(RunningService.ACTION_START_NEW)
+                    }
+                )
+                return@setContent
+            }
 
             val startDest = remember {
                 val prefs = getSharedPreferences("runvoice", MODE_PRIVATE)
@@ -131,8 +178,12 @@ class MainActivity : ComponentActivity() {
                         onStart = { startRunService() },
                         onPause = { sendServiceAction(RunningService.ACTION_PAUSE) },
                         onResume = { sendServiceAction(RunningService.ACTION_RESUME) },
+                        onInterruptAndExit = {
+                            sendServiceAction(RunningService.ACTION_INTERRUPT_FOR_RECOVERY)
+                            finishAndRemoveTask()
+                        },
                         hrConnected = hrConnected,
-                        onSaveAndStop = {
+                        onSaveTraceAndStop = {
                             service?.stopRun(saveSession = true)
                                 ?: TraceSaveResult.Failed("跑步服务未连接，数据尚未保存")
                         },
@@ -193,8 +244,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startRunService() {
+        startForegroundServiceAction(RunningService.ACTION_START)
+    }
+
+    private fun startForegroundServiceAction(action: String) {
         val intent = Intent(this, RunningService::class.java).apply {
-            action = RunningService.ACTION_START
+            this.action = action
         }
         ContextCompat.startForegroundService(this, intent)
     }

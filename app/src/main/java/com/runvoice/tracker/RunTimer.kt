@@ -32,6 +32,14 @@ class RunTimer(private val nowMillis: () -> Long = SystemClock::elapsedRealtime)
         accumulated = _elapsedSeconds.value
     }
 
+    fun restore(elapsedSeconds: Long) {
+        require(elapsedSeconds >= 0L)
+        timerJob?.cancel()
+        timerJob = null
+        accumulated = elapsedSeconds
+        _elapsedSeconds.value = elapsedSeconds
+    }
+
     fun reset() {
         timerJob?.cancel()
         timerJob = null
