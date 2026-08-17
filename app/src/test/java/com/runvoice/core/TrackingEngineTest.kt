@@ -31,7 +31,7 @@ class TrackingEngineTest {
         assertTrue(recovered.totalDistanceMeters in 11f..13f)
     }
 
-    @Test fun sustainedHighSpeedReanchorsAndRecoversInsteadOfBecomingPermanentJump() {
+    @Test fun sustainedPlausibleRejectedChainBridgesStraightFromLastTrustedPoint() {
         val engine = TrackingEngine(
             TrackingConfig(
                 trackingAlertDelayMillis = 5_000,
@@ -45,14 +45,14 @@ class TrackingEngineTest {
             engine.process(sample(1_000L + index * 1_000L, index * 10.0))
         }
 
-        assertTrue(rejected.all { it.disposition == TrackingDisposition.Ignored })
+        assertEquals(1, rejected.count { it.reason == "speed_above_7_mps_bridged" })
         assertTrue(rejected.none { it.reason.startsWith("jump_gt_100m") })
         assertEquals(1, rejected.count { it.alert == TrackingAlert.HighSpeedStarted })
 
         val recovered = engine.process(sample(9_000, 75.0))
         assertEquals(TrackingDisposition.Accepted, recovered.disposition)
-        assertEquals(TrackingAlert.Recovered, recovered.alert)
-        assertTrue(recovered.totalDistanceMeters in 4f..6f)
+        assertEquals("speed_above_7_mps_bridged", recovered.reason)
+        assertTrue(recovered.totalDistanceMeters in 74f..76f)
     }
 
     @Test fun consistentLocationsAfterHugeJumpReanchorWithoutAddingUncertainGap() {

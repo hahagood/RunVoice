@@ -11,13 +11,13 @@ import java.io.File
 import java.io.FileOutputStream
 
 internal class RunSummaryImageStorage(private val context: Context) {
-    fun save(bitmap: Bitmap, fileName: String): String = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    fun save(bitmap: Bitmap, fileName: String): SummaryImageSaveResult = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
         saveWithMediaStore(bitmap, fileName)
     } else {
         saveToAppStorage(bitmap, fileName)
     }
 
-    private fun saveWithMediaStore(bitmap: Bitmap, fileName: String): String {
+    private fun saveWithMediaStore(bitmap: Bitmap, fileName: String): SummaryImageSaveResult {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Images.Media.MIME_TYPE, "image/png")
@@ -35,14 +35,17 @@ internal class RunSummaryImageStorage(private val context: Context) {
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
             check(resolver.update(uri, values, null, null) > 0) { "Unable to publish image" }
-            return "数据摘要海报已保存到本地相册"
+            return SummaryImageSaveResult(
+                message = "数据摘要海报已保存到本地相册",
+                reference = uri.toString()
+            )
         } catch (failure: Throwable) {
             uri?.let { runCatching { resolver.delete(it, null, null) } }
             throw failure
         }
     }
 
-    private fun saveToAppStorage(bitmap: Bitmap, fileName: String): String {
+    private fun saveToAppStorage(bitmap: Bitmap, fileName: String): SummaryImageSaveResult {
         val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
             ?: File(context.filesDir, "pictures")
         val dir = File(baseDir, "RunVoice")
@@ -51,6 +54,9 @@ internal class RunSummaryImageStorage(private val context: Context) {
         FileOutputStream(file).use { output ->
             check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) { "PNG encoding failed" }
         }
-        return "数据摘要海报已保存到 ${file.absolutePath}"
+        return SummaryImageSaveResult(
+            message = "数据摘要海报已保存到 ${file.absolutePath}",
+            reference = file.absolutePath
+        )
     }
 }

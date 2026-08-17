@@ -16,12 +16,21 @@ import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
 
+data class SummaryImageSaveResult(
+    val message: String,
+    val reference: String
+)
+
 class RunSummaryImageSaver(private val context: Context) {
     private val traceReader = TraceCsvReader()
     private val traceGeometry = TraceGeometry()
     private val storage = RunSummaryImageStorage(context)
 
-    fun saveSummary(runData: RunData, finishedAtMillis: Long, traceCsvPath: String? = null): String {
+    fun saveSummary(
+        runData: RunData,
+        finishedAtMillis: Long,
+        traceCsvPath: String? = null
+    ): SummaryImageSaveResult {
         val fileName = "RunVoice-${timestampForFile(finishedAtMillis)}.png"
         val bitmap = renderSummaryBitmap(runData, finishedAtMillis, traceCsvPath)
 

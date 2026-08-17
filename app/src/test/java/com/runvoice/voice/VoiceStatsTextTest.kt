@@ -7,8 +7,8 @@ class VoiceStatsTextTest {
     @Test fun formatsPaceAsCompactMinutesAndTwoDigitSeconds() {
         assertEquals("三四六", VoiceStatsText.pace(3 * 60 + 46))
         assertEquals("四〇六", VoiceStatsText.pace(4 * 60 + 6))
-        assertEquals("一〇〇〇", VoiceStatsText.pace(10 * 60))
-        assertEquals("一二三〇", VoiceStatsText.pace(12 * 60 + 30))
+        assertEquals("幺〇〇〇", VoiceStatsText.pace(10 * 60))
+        assertEquals("幺二三五", VoiceStatsText.pace(12 * 60 + 35))
     }
 
     @Test fun formatsHeartRateAsIndividualDigits() {

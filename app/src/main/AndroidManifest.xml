@@ -54,14 +54,6 @@
             android:exported="false"
             android:foregroundServiceType="location" />
 
-        <receiver
-            android:name=".service.MediaButtonIntentReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MEDIA_BUTTON" />
-            </intent-filter>
-        </receiver>
-
     </application>
 
 </manifest>

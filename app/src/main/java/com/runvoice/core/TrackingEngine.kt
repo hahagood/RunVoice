@@ -275,10 +275,10 @@ class TrackingEngine(private val config: TrackingConfig = TrackingConfig()) {
     }
 
     /**
-     * Keeps suspicious samples out of distance totals while following them in quarantine. Once
-     * several consecutive samples form a physically plausible chain, the local anchor is rebased
-     * without adding the uncertain gap. This prevents a speed rejection from becoming an endless
-     * `jump_gt_100m` rejection as the runner continues moving away from the old accepted point.
+     * Keeps suspicious samples in quarantine until several consecutive points form a physically
+     * plausible chain. If the average straight-line speed from the last trusted point to the
+     * confirmed point is still plausible for the recovery envelope, bridge that gap directly.
+     * Otherwise treat it as a real relocation and re-anchor without adding the uncertain jump.
      */
     private fun rejectAndTrackRecovery(
         sample: LocationSample,
@@ -307,6 +307,30 @@ class TrackingEngine(private val config: TrackingConfig = TrackingConfig()) {
             rejectedChainSamples >= config.rejectedChainMinSamples &&
             chainDuration >= config.rejectedChainMinDurationMillis
         if (confirmedRejectedChain) {
+            val bridgeAnchor = lastSample
+            val bridgeElapsedMillis = bridgeAnchor?.let {
+                sample.elapsedRealtimeMillis - it.elapsedRealtimeMillis
+            } ?: 0L
+            val bridgeSpeed = if (bridgeElapsedMillis > 0L) {
+                distanceFromAcceptedAnchor / (bridgeElapsedMillis / 1_000f)
+            } else {
+                Float.POSITIVE_INFINITY
+            }
+            val canBridgeDirectly = distanceFromAcceptedAnchor.isFinite() &&
+                distanceFromAcceptedAnchor >= 0f &&
+                bridgeSpeed.isFinite() &&
+                bridgeSpeed <= config.rejectedChainMaxSpeedMetersPerSecond
+
+            if (canBridgeDirectly) {
+                lastSample = sample
+                clearStationaryLock()
+                totalDistance += distanceFromAcceptedAnchor
+                segmentDistance += distanceFromAcceptedAnchor
+                updatePace(sample.elapsedRealtimeMillis)
+                val alert = observeUnhealthyTracking(issue, sample.elapsedRealtimeMillis)
+                clearRejectedChain()
+                return accepted("${reason}_bridged", distanceFromAcceptedAnchor, alert)
+            }
             followingRejectedChain = true
         }
 

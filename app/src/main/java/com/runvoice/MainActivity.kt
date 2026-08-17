@@ -25,9 +25,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.runvoice.history.archive.RunArchiveCoordinator
+import com.runvoice.history.archive.RunSummaryImageArchiver
+import com.runvoice.history.data.RunHistoryDatabase
+import com.runvoice.history.data.RunHistoryFileCleaner
+import com.runvoice.history.data.RunHistoryRepository
+import com.runvoice.history.ui.HistoryRoute
+import com.runvoice.history.ui.RunArchiveViewModel
+import com.runvoice.history.ui.RunHistoryDetailRoute
 import com.runvoice.model.RunData
 import com.runvoice.recovery.RunCheckpointStore
 import com.runvoice.service.RunningService
@@ -98,6 +107,22 @@ class MainActivity : ComponentActivity() {
             val service by serviceState
             val hasPermissions by permissionsGranted
             val navController = rememberNavController()
+            val historyRepository = remember {
+                RunHistoryRepository(
+                    dao = RunHistoryDatabase.getInstance(applicationContext).runHistoryDao(),
+                    fileCleaner = RunHistoryFileCleaner(applicationContext)
+                )
+            }
+            val archiveCoordinator = remember {
+                RunArchiveCoordinator(
+                    recordWriter = historyRepository,
+                    imageArchiver = RunSummaryImageArchiver(applicationContext)
+                )
+            }
+            val archiveViewModel: RunArchiveViewModel = viewModel(
+                factory = RunArchiveViewModel.Factory(archiveCoordinator)
+            )
+            val archiveUiState by archiveViewModel.uiState.collectAsStateWithLifecycle()
 
             if (!hasPermissions) {
                 PermissionScreen(onRequestPermissions = {
@@ -183,20 +208,47 @@ class MainActivity : ComponentActivity() {
                             finishAndRemoveTask()
                         },
                         hrConnected = hrConnected,
-                        onSaveTraceAndStop = {
-                            service?.stopRun(saveSession = true)
-                                ?: TraceSaveResult.Failed("跑步服务未连接，数据尚未保存")
+                        onArchiveAndStop = { snapshot ->
+                            archiveViewModel.archive(snapshot) {
+                                service?.stopRun(saveSession = true)
+                                    ?: TraceSaveResult.Failed("跑步服务未连接，数据尚未保存")
+                            }
                         },
+                        archiveUiState = archiveUiState,
+                        onClearArchiveState = archiveViewModel::clear,
                         onDiscardAndStop = {
                             service?.stopRun(saveSession = false)
                                 ?: TraceSaveResult.Failed("跑步服务未连接，无法结束本次记录")
                         },
                         onOpenHrSettings = { navController.navigate("hr_settings") },
+                        onOpenHistory = { navController.navigate("history") },
                         onOpenAbout = { navController.navigate("about") },
                         onToggleMetronome = { service?.toggleMetronome() },
                         onBpmChange = { bpm -> service?.setMetronomeBpm(bpm) },
-                        currentTracePathForSnapshot = { service?.currentTracePathForSnapshot() }
+                        currentTracePathForSnapshot = { service?.currentTracePathForSnapshot() },
+                        currentRunStartedAtEpochMillis = {
+                            service?.currentSessionStartedAtEpochMillis()
+                        }
                     )
+                }
+                composable("history") {
+                    HistoryRoute(
+                        repository = historyRepository,
+                        onBack = { navController.popBackStack() },
+                        onOpenRecord = { recordId ->
+                            navController.navigate("history_detail/$recordId")
+                        }
+                    )
+                }
+                composable("history_detail/{recordId}") { backStackEntry ->
+                    backStackEntry.arguments?.getString("recordId")?.let { recordId ->
+                        RunHistoryDetailRoute(
+                            recordId = recordId,
+                            repository = historyRepository,
+                            onBack = { navController.popBackStack() },
+                            onDeleted = { navController.popBackStack() }
+                        )
+                    }
                 }
                 composable("about") {
                     AboutScreen(onBack = {

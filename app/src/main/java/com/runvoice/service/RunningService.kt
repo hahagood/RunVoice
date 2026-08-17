@@ -1,19 +1,14 @@
 package com.runvoice.service
 
 import android.app.*
-import android.content.ComponentName
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
-import android.media.AudioAttributes
-import android.media.session.MediaSession
-import android.media.session.PlaybackState
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
 import android.util.Log
-import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import com.runvoice.MainActivity
 import com.runvoice.R
@@ -36,6 +31,7 @@ import com.runvoice.tracker.TraceSaveResult
 import com.runvoice.voice.Metronome
 import com.runvoice.voice.VoiceAnnouncer
 import com.runvoice.voice.VoiceStatsText
+import com.runvoice.voice.VolumeKeyWatcher
 import java.util.Calendar
 import java.util.Locale
 import kotlinx.coroutines.*
@@ -57,9 +53,9 @@ class RunningService : Service() {
         const val ACTION_INTERRUPT_FOR_RECOVERY = "com.runvoice.INTERRUPT_FOR_RECOVERY"
         const val ACTION_STOP = "com.runvoice.STOP"
         const val ACTION_TEST_ANNOUNCE = "com.runvoice.TEST_ANNOUNCE"
-        const val ACTION_HANDLE_MEDIA_BUTTON = "com.runvoice.HANDLE_MEDIA_BUTTON"
         private const val STATIONARY_PROMPT_DELAY_MS = 0L
         private const val STATIONARY_PROMPT_MIN_INTERVAL_MS = 60_000L
+        private const val COUNTING_RESUME_PROMPT_MIN_INTERVAL_MS = 10_000L
         private const val HEART_RATE_DISCONNECT_PROMPT_DELAY_MS = 5_000L
         private const val CHECKPOINT_INTERVAL_SECONDS = 5L
     }
@@ -100,9 +96,9 @@ class RunningService : Service() {
     private var heartRateConnectionPromptJob: Job? = null
     private var preRunHrJob: Job? = null
     private var maxHeartRate = 0
-    private var mediaSession: MediaSession? = null
-    private var lastMediaButtonHandledAt = 0L
+    private lateinit var volumeKeyWatcher: VolumeKeyWatcher
     private var lastStationaryPromptAt = 0L
+    private var lastCountingResumeAnnouncedAt = 0L
     private var lastLapElapsedSeconds = 0L
     private var sessionStartedAtEpochMillis = 0L
     private var lastCheckpointElapsedSeconds = -CHECKPOINT_INTERVAL_SECONDS
@@ -113,7 +109,6 @@ class RunningService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        mediaSession = buildMediaSession()
         prefs = getSharedPreferences("runvoice", MODE_PRIVATE)
         checkpointStore = RunCheckpointStore(this)
         motionDetector = MotionDetector(this)
@@ -125,6 +120,11 @@ class RunningService : Service() {
         )
         runTimer = RunTimer()
         voiceAnnouncer = VoiceAnnouncer(this, onRecovered = ::announceVoiceRecovery)
+        volumeKeyWatcher = VolumeKeyWatcher(
+            context = this,
+            runActiveProvider = ::hasActiveRunSession,
+            onAnnounce = { announceCurrentStats() }
+        )
         metronome = Metronome()
         // Restore saved metronome BPM and auto-start if was active
         metronome.setBpm(prefs.getInt("metronome_bpm", 180))
@@ -151,8 +151,6 @@ class RunningService : Service() {
             ACTION_RESUME -> resumeRun()
             ACTION_INTERRUPT_FOR_RECOVERY -> interruptForRecovery()
             ACTION_STOP -> serviceScope.launch { stopRun() }
-            ACTION_HANDLE_MEDIA_BUTTON,
-            Intent.ACTION_MEDIA_BUTTON -> dispatchMediaButtonIntent(intent)
             ACTION_TEST_ANNOUNCE -> {
                 val data = _runData.value
                 voiceAnnouncer.announceKilometer(
@@ -199,7 +197,7 @@ class RunningService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, buildNotification("跑步中 00:00"))
         }
-        updateMediaSession(active = true, paused = false)
+        volumeKeyWatcher.start()
 
         runTimer.start(serviceScope)
         val gpsStart = gpsTracker.start()
@@ -211,7 +209,7 @@ class RunningService : Service() {
             sessionController.dispatch(RunCommand.BeginFinish)
             sessionController.dispatch(RunCommand.CompleteFinish)
             _runData.update { it.copy(isRunning = false, isPaused = false) }
-            updateMediaSession(active = false, paused = false)
+            volumeKeyWatcher.stop()
             stopForeground(STOP_FOREGROUND_REMOVE)
             startPreRunHrObservation()
             voiceAnnouncer.speak("无法启动定位，本次跑步未开始")
@@ -309,7 +307,7 @@ class RunningService : Service() {
             startTrackerEventObservation()
             startStationaryPromptObservation()
             startHeartRateConnectionPromptObservation()
-            updateMediaSession(active = true, paused = false)
+            volumeKeyWatcher.start()
             updateNotification("已续跑 ${_runData.value.timeFormatted} · ${_runData.value.distanceFormatted}km")
             _recoveryInProgress.value = false
             persistCheckpoint(force = true)
@@ -326,7 +324,7 @@ class RunningService : Service() {
         sessionController.dispatch(RunCommand.BeginFinish)
         sessionController.dispatch(RunCommand.CompleteFinish)
         _runData.update { it.copy(isRunning = false, isPaused = false) }
-        updateMediaSession(active = false, paused = false)
+        volumeKeyWatcher.stop()
         stopForeground(STOP_FOREGROUND_REMOVE)
         startPreRunHrObservation()
         _recoveryInProgress.value = false
@@ -369,7 +367,7 @@ class RunningService : Service() {
         gpsTracker.stopUpdates()
         motionDetector.stop()
         gpsTracker.closeTraceForRecovery()
-        updateMediaSession(active = false, paused = true)
+        volumeKeyWatcher.stop()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -386,7 +384,6 @@ class RunningService : Service() {
         stationaryPromptJob?.cancel()
         _runData.update { it.copy(isPaused = true) }
         persistCheckpoint(force = true)
-        updateMediaSession(active = true, paused = true)
         updateNotification("已暂停")
         voiceAnnouncer.speak("已暂停")
     }
@@ -411,7 +408,6 @@ class RunningService : Service() {
         startStationaryPromptObservation()
         _runData.update { it.copy(isPaused = false) }
         persistCheckpoint(force = true)
-        updateMediaSession(active = true, paused = false)
         voiceAnnouncer.speak("继续跑步")
     }
 
@@ -451,7 +447,7 @@ class RunningService : Service() {
         // Keep last data visible, just mark as stopped
         _runData.update { it.copy(isRunning = false, isPaused = false) }
         sessionController.dispatch(RunCommand.CompleteFinish)
-        updateMediaSession(active = false, paused = false)
+        volumeKeyWatcher.stop()
         startPreRunHrObservation()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -544,6 +540,18 @@ class RunningService : Service() {
         val hrConnected: Boolean
     )
 
+    /**
+     * One phrase for every reason distance counting stopped — standing still, an implausible
+     * speed, or a location jump — so resuming always sounds the same. Overlapping causes that
+     * clear together are announced once.
+     */
+    private fun announceCountingResumed() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastCountingResumeAnnouncedAt < COUNTING_RESUME_PROMPT_MIN_INTERVAL_MS) return
+        lastCountingResumeAnnouncedAt = now
+        voiceAnnouncer.speakPriority("恢复计数")
+    }
+
     private fun startStationaryPromptObservation() {
         stationaryPromptJob?.cancel()
         stationaryPromptJob = serviceScope.launch {
@@ -554,7 +562,7 @@ class RunningService : Service() {
                         val data = _runData.value
                         if (waitingForMovementResumePrompt && data.isRunning && !data.isPaused) {
                             waitingForMovementResumePrompt = false
-                            voiceAnnouncer.speak("已恢复运动，继续计数")
+                            announceCountingResumed()
                         }
                         return@collectLatest
                     }
@@ -583,12 +591,12 @@ class RunningService : Service() {
                 gpsTracker.trackingAlerts.collect { alert ->
                     val data = _runData.value
                     if (!data.isRunning || data.isPaused) return@collect
-                    val prompt = when (alert) {
+                    when (alert) {
                         TrackingAlert.HighSpeedStarted,
-                        TrackingAlert.LocationJumpStarted -> "GPS信号不稳定，正在校正距离"
-                        TrackingAlert.Recovered -> "GPS信号已稳定，继续记录距离"
+                        TrackingAlert.LocationJumpStarted ->
+                            voiceAnnouncer.speakPriority("GPS信号不稳定，正在校正距离")
+                        TrackingAlert.Recovered -> announceCountingResumed()
                     }
-                    voiceAnnouncer.speakPriority(prompt)
                 }
             }
             launch {
@@ -691,66 +699,6 @@ class RunningService : Service() {
         manager.createNotificationChannel(channel)
     }
 
-    private fun buildMediaSession(): MediaSession {
-        val mediaButtonReceiver = PendingIntent.getBroadcast(
-            this,
-            0,
-            Intent(Intent.ACTION_MEDIA_BUTTON).apply {
-                component = ComponentName(this@RunningService, MediaButtonIntentReceiver::class.java)
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        return MediaSession(this, "RunVoiceSession").apply {
-            setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
-            setPlaybackToLocal(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            setMediaButtonReceiver(mediaButtonReceiver)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                setMediaButtonBroadcastReceiver(ComponentName(this@RunningService, MediaButtonIntentReceiver::class.java))
-            }
-            setCallback(object : MediaSession.Callback() {
-                override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
-                    val event = extractMediaKeyEvent(mediaButtonIntent) ?: return false
-                    return handleMediaButtonEvent(event)
-                }
-
-                override fun onPlay() {
-                    handleTransportControl()
-                }
-
-                override fun onPause() {
-                    handleTransportControl()
-                }
-            })
-            isActive = false
-        }
-    }
-
-    private fun updateMediaSession(active: Boolean, paused: Boolean) {
-        val session = mediaSession ?: return
-        session.isActive = active
-        val state = when {
-            !active -> PlaybackState.STATE_STOPPED
-            paused -> PlaybackState.STATE_PAUSED
-            else -> PlaybackState.STATE_PLAYING
-        }
-        session.setPlaybackState(
-            PlaybackState.Builder()
-                .setActions(
-                    PlaybackState.ACTION_PLAY_PAUSE or
-                        PlaybackState.ACTION_PLAY or
-                        PlaybackState.ACTION_PAUSE
-                )
-                .setState(state, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1f)
-                .build()
-        )
-    }
-
     private fun announceCurrentStats(
         leadingText: String? = null,
         recoveryStatus: Boolean = false,
@@ -803,53 +751,6 @@ class RunningService : Service() {
         return "${hour}点${minute}分"
     }
 
-    private fun extractMediaKeyEvent(intent: Intent): KeyEvent? {
-        @Suppress("DEPRECATION")
-        return intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT) as? KeyEvent
-    }
-
-    private fun dispatchMediaButtonIntent(intent: Intent) {
-        val event = extractMediaKeyEvent(intent)
-        if (event == null) {
-            Log.w(TAG, "Ignoring media button intent without KeyEvent")
-            return
-        }
-
-        val handled = mediaSession?.controller?.dispatchMediaButtonEvent(event) == true
-        if (!handled) {
-            Log.w(TAG, "Media button was not handled by session controller")
-        }
-    }
-
-    private fun handleMediaButtonEvent(event: KeyEvent): Boolean {
-        if (!_runData.value.isRunning) return false
-
-        when (event.keyCode) {
-            KeyEvent.KEYCODE_HEADSETHOOK,
-            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-            KeyEvent.KEYCODE_MEDIA_PLAY,
-            KeyEvent.KEYCODE_MEDIA_PAUSE -> {
-                if (event.action != KeyEvent.ACTION_UP || event.repeatCount != 0) {
-                    return true
-                }
-                val now = SystemClock.elapsedRealtime()
-                if (now - lastMediaButtonHandledAt < 400L) return true
-                lastMediaButtonHandledAt = now
-                announceCurrentStats()
-                return true
-            }
-        }
-        return false
-    }
-
-    private fun handleTransportControl() {
-        if (!_runData.value.isRunning) return
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastMediaButtonHandledAt < 400L) return
-        lastMediaButtonHandledAt = now
-        announceCurrentStats()
-    }
-
     private fun buildNotification(text: String): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this, 0,
@@ -897,6 +798,9 @@ class RunningService : Service() {
         gpsTracker.flushTrace()
         return gpsTracker.currentTracePath()
     }
+
+    fun currentSessionStartedAtEpochMillis(): Long? =
+        sessionStartedAtEpochMillis.takeIf { hasActiveRunSession() && it > 0L }
 
     private fun persistCheckpoint(force: Boolean = false) {
         if (!hasActiveRunSession()) return
@@ -966,6 +870,7 @@ class RunningService : Service() {
             sessionController.state == RunSessionState.Paused
 
     override fun onDestroy() {
+        volumeKeyWatcher.stop()
         val preserveInterruptedRun = hasActiveRunSession()
         if (preserveInterruptedRun) {
             persistCheckpointSynchronously()
@@ -973,8 +878,6 @@ class RunningService : Service() {
             motionDetector.stop()
             gpsTracker.closeTraceForRecovery()
         }
-        mediaSession?.release()
-        mediaSession = null
         serviceScope.cancel()
         voiceAnnouncer.shutdown()
         metronome.release()

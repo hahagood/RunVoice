@@ -24,6 +24,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -39,12 +40,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.runvoice.history.archive.RunArchiveOutcome
+import com.runvoice.history.model.CompletedRunSnapshot
+import com.runvoice.history.ui.RunArchiveUiState
 import com.runvoice.model.RunData
-import com.runvoice.share.RunSummaryImageSaver
 import com.runvoice.tracker.TraceSaveResult
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -67,24 +68,42 @@ fun RunScreen(
     onPause: () -> Unit,
     onResume: () -> Unit,
     onInterruptAndExit: () -> Unit,
-    onSaveTraceAndStop: suspend () -> TraceSaveResult,
+    onArchiveAndStop: (CompletedRunSnapshot) -> Unit,
+    archiveUiState: RunArchiveUiState,
+    onClearArchiveState: () -> Unit,
     onDiscardAndStop: suspend () -> TraceSaveResult,
     onOpenHrSettings: () -> Unit,
+    onOpenHistory: () -> Unit,
     onOpenAbout: () -> Unit = {},
     onToggleMetronome: () -> Unit = {},
     onBpmChange: (Int) -> Unit = {},
     currentTracePathForSnapshot: () -> String? = { null },
+    currentRunStartedAtEpochMillis: () -> Long? = { null },
     hrConnected: Boolean = false
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val imageSaver = remember(context) { RunSummaryImageSaver(context) }
     var showStopConfirm by rememberSaveable { mutableStateOf(false) }
     var stopConfirmAtMillis by rememberSaveable { mutableLongStateOf(0L) }
     var stopSummaryRunData by remember { mutableStateOf<RunData?>(null) }
     var stopTraceCsvPath by rememberSaveable { mutableStateOf<String?>(null) }
-    var saveState by rememberSaveable { mutableStateOf(RunSaveUiState.Ready) }
-    var saveError by rememberSaveable { mutableStateOf<String?>(null) }
+    val saveState = when {
+        archiveUiState.saving -> RunSaveUiState.Saving
+        archiveUiState.result?.outcome == RunArchiveOutcome.Complete -> RunSaveUiState.Saved
+        archiveUiState.result?.outcome == RunArchiveOutcome.Partial -> RunSaveUiState.PartiallySaved
+        archiveUiState.result?.outcome == RunArchiveOutcome.Failed || archiveUiState.errorMessage != null -> {
+            RunSaveUiState.Failed
+        }
+        else -> RunSaveUiState.Ready
+    }
+    val saveError = archiveUiState.result?.message ?: archiveUiState.errorMessage
+
+    LaunchedEffect(archiveUiState.result, archiveUiState.errorMessage) {
+        val message = archiveUiState.result?.message ?: archiveUiState.errorMessage
+        if (message != null) {
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        }
+    }
 
     if (showStopConfirm) {
         StopRunConfirmScreen(
@@ -94,63 +113,32 @@ fun RunScreen(
             saveError = saveError,
             onSaveRun = { finishedAtMillis ->
                 if (saveState != RunSaveUiState.Ready) return@StopRunConfirmScreen
-                saveState = RunSaveUiState.Saving
                 val summaryRunData = stopSummaryRunData ?: runData
                 val traceCsvPath = stopTraceCsvPath ?: currentTracePathForSnapshot()
-                scope.launch {
-                    val imageResult = withContext(Dispatchers.IO) {
-                        runCatching {
-                            imageSaver.saveSummary(summaryRunData, finishedAtMillis, traceCsvPath)
-                        }
-                    }
-                    val traceResult = onSaveTraceAndStop()
-                    val imageError = imageResult.exceptionOrNull()?.message ?: "未知错误"
-
-                    when {
-                        imageResult.isSuccess && traceResult is TraceSaveResult.Saved -> {
-                            saveState = RunSaveUiState.Saved
-                            saveError = null
-                            Toast.makeText(
-                                context,
-                                "摘要海报和轨迹数据均已保存",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        }
-                        imageResult.isSuccess && traceResult is TraceSaveResult.Failed -> {
-                            saveState = RunSaveUiState.PartiallySaved
-                            saveError = "摘要海报已保存；轨迹数据保存失败：${traceResult.message}"
-                            Toast.makeText(context, saveError, Toast.LENGTH_LONG).show()
-                        }
-                        imageResult.isSuccess && traceResult is TraceSaveResult.Discarded -> {
-                            saveState = RunSaveUiState.PartiallySaved
-                            saveError = "摘要海报已保存，但没有生成轨迹文件"
-                            Toast.makeText(context, saveError, Toast.LENGTH_LONG).show()
-                        }
-                        imageResult.isFailure && traceResult is TraceSaveResult.Saved -> {
-                            saveState = RunSaveUiState.PartiallySaved
-                            saveError = "轨迹数据已保存；摘要海报保存失败：$imageError"
-                            Toast.makeText(context, saveError, Toast.LENGTH_LONG).show()
-                        }
-                        else -> {
-                            saveState = RunSaveUiState.Failed
-                            val traceError = when (traceResult) {
-                                is TraceSaveResult.Failed -> traceResult.message
-                                TraceSaveResult.Discarded -> "没有生成轨迹文件"
-                                is TraceSaveResult.Saved -> "未知错误"
-                            }
-                            saveError = "摘要海报保存失败：$imageError；轨迹数据保存失败：$traceError"
-                            Toast.makeText(context, saveError, Toast.LENGTH_LONG).show()
-                        }
-                    }
-                }
+                val fallbackStartedAt = (
+                    finishedAtMillis - summaryRunData.elapsedSeconds * 1_000L
+                ).coerceAtLeast(1L)
+                val startedAt = currentRunStartedAtEpochMillis()
+                    ?.coerceIn(1L, finishedAtMillis)
+                    ?: fallbackStartedAt
+                val snapshot = CompletedRunSnapshot(
+                    id = CompletedRunSnapshot.stableId(startedAt, finishedAtMillis),
+                    startedAtEpochMillis = startedAt,
+                    finishedAtEpochMillis = finishedAtMillis,
+                    elapsedSeconds = summaryRunData.elapsedSeconds,
+                    distanceMeters = summaryRunData.distanceMeters,
+                    averagePaceSecondsPerKm = summaryRunData.averagePaceSecondsPerKm,
+                    maxHeartRateBpm = summaryRunData.maxHeartRate,
+                    traceWorkingPath = traceCsvPath
+                )
+                onArchiveAndStop(snapshot)
             },
             onExit = {
-                val shouldDiscard = saveState == RunSaveUiState.Ready
+                val shouldDiscard = runData.isRunning
                 showStopConfirm = false
                 stopSummaryRunData = null
                 stopTraceCsvPath = null
-                saveState = RunSaveUiState.Ready
-                saveError = null
+                onClearArchiveState()
                 stopConfirmAtMillis = 0L
                 if (shouldDiscard) {
                     scope.launch {
@@ -177,6 +165,7 @@ fun RunScreen(
         HeaderRow(
             hrConnected = hrConnected,
             onOpenAbout = onOpenAbout,
+            onOpenHistory = onOpenHistory,
             onOpenHrSettings = onOpenHrSettings
         )
 
@@ -258,8 +247,7 @@ fun RunScreen(
                                 stopConfirmAtMillis = System.currentTimeMillis()
                                 stopSummaryRunData = runData
                                 stopTraceCsvPath = currentTracePathForSnapshot()
-                                saveState = RunSaveUiState.Ready
-                                saveError = null
+                                onClearArchiveState()
                                 showStopConfirm = true
                             },
                             modifier = Modifier
@@ -495,6 +483,7 @@ private fun formatFinishedAt(finishedAtMillis: Long): String {
 private fun HeaderRow(
     hrConnected: Boolean,
     onOpenAbout: () -> Unit,
+    onOpenHistory: () -> Unit,
     onOpenHrSettings: () -> Unit
 ) {
     Row(
@@ -510,6 +499,14 @@ private fun HeaderRow(
             )
         }
         Spacer(modifier = Modifier.weight(1f))
+        TextButton(onClick = onOpenHistory) {
+            Text(
+                text = "历史",
+                color = TextSecondary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
         FilledTonalButton(
             onClick = onOpenHrSettings,
             colors = ButtonDefaults.filledTonalButtonColors(
@@ -519,7 +516,7 @@ private fun HeaderRow(
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
         ) {
             Text(
-                text = if (hrConnected) "心率监控已连接" else "心率监控未连接",
+                text = if (hrConnected) "心率 已连接" else "心率 未连接",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium
             )

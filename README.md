@@ -2,7 +2,7 @@
 
 轻量、离线优先的 Android 跑步语音播报应用。跑步时无需反复查看手机，RunVoice 会通过手机扬声器或蓝牙耳机播报距离、时间、配速和心率。
 
-当前稳定里程碑：**v1.0.7**。项目面向 Android 8.0+，核心记录链路不依赖账号、云服务或在线地图。
+当前开发版本：**v1.1.0**；最新已发布稳定版：**v1.0.7**。项目面向 Android 8.0+，核心记录链路不依赖账号、云服务或在线地图。
 
 [下载最新 Release](https://github.com/hahagood/RunVoice/releases/latest)
 
@@ -26,7 +26,8 @@
 - 心率连续超过 180 bpm 达 3 秒后发出安全提醒；同一次持续超标只提醒一次。
 - 每个整公里播报距离、用时、心率和当前配速。
 - 在每公里的 0.25 / 0.50 / 0.75 km 处播报当前配速和心率。
-- 支持蓝牙耳机单击媒体键即时播报当前时间、距离、用时、心率、最大心率和平均配速。
+- 支持蓝牙耳机音量键即时播报当前时间、距离、用时、心率、最大心率和平均配速。
+- 跑步中且屏幕熄灭时，音量键被当作功能键：按下后立即写回原音量并播报，音量+ 和音量- 都可触发。亮屏时正常调节音量，新音量成为下次的保护值。
 - 所有 TTS 前播放极短提示音预热，降低部分手机或耳机吞掉句首的概率；TTS 故障会自动重建并播报恢复状态。
 - 内置 160–220 BPM 步频节拍器，使用 `AudioTrack` 硬件时钟避免累计误差。
 
@@ -39,15 +40,25 @@
 - 跑步期间保存原始定位 CSV，包含接受/过滤决策、原因、累计距离、分段配速、心率和连接状态。
 - 结束后可一次保存摘要海报和 GPS 轨迹；未保存并返回首页时会删除本次临时轨迹。
 
+### 本地历史记录
+
+- 只有在结束页明确选择“保存海报和轨迹”时，才会创建一条历史记录；直接返回首页仍按原逻辑放弃本次数据。
+- 按月查看跑步列表，并汇总次数、总距离、总时长、最长距离和最快平均配速。
+- 单次详情保留开始/结束时间、有效运动时长、距离、平均配速、最大心率及海报/轨迹保存状态。
+- 海报、公共轨迹或历史数据库任一环节失败时互不阻断；至少有一项保存成功就显示为“部分保存”。
+- 删除历史记录会清理对应的应用内轨迹和应用内海报，但不会删除已导出到 `Documents` 或系统相册的公共副本。
+
 ## 基本使用
 
 1. 打开应用并授予精确定位权限。蓝牙和通知权限按需授予。
 2. 可选：进入“心率监控”，扫描并连接标准 BLE 心率设备。
 3. 可选：开启节拍器并调整 BPM；开关与 BPM 会被记忆。
 4. 点击“开始跑步”，锁屏后放入口袋即可。
-5. 跑步中点击“暂停跑步”，可继续、结束，或“暂存本次跑步并退出”。
-6. 结束确认页可选择“保存海报和轨迹”，或直接返回首页放弃未保存记录。
-7. 若启动时发现 checkpoint，选择继续上次跑步或删除旧记录并开始新的跑步。
+5. 息屏跑步时按蓝牙耳机的音量+ 或音量- 即可即时播报，应用会把音量写回原值。需要真正调节音量时先点亮屏幕。
+6. 跑步中点击“暂停跑步”，可继续、结束，或“暂存本次跑步并退出”。
+7. 结束确认页可选择“保存海报和轨迹”，或直接返回首页放弃未保存记录。
+8. 首页点击“历史”可按月浏览已经保存的跑步记录和汇总数据。
+9. 若启动时发现 checkpoint，选择继续上次跑步或删除旧记录并开始新的跑步。
 
 ## 播报示例
 
@@ -59,7 +70,7 @@
 
 > 配速：六一零，心率：幺四二
 
-耳机按键即时播报：
+耳机音量键即时播报：
 
 > 现在时间14点5分，当前已跑2.35公里，用时12分30秒，心率：幺四二，最大心率：幺五六，平均配速：五一八
 
@@ -91,6 +102,8 @@ adb pull /sdcard/Documents/RunVoice/gps-traces ./gps-traces
 
 公共 Documents 副本不会随应用卸载而删除。CSV 含精确经纬度、时间、速度、海拔和心率，可能暴露住所、工作地点与健康信息；分享、提交 Issue 或上传轨迹前请先脱敏。
 
+跑步摘要保存在 Room 本地数据库 `run-history.db` 中，不上传云端，也不会扫描或导入旧版 CSV。历史记录保存了应用内文件与公共副本的引用，以便显示保存状态并为后续轨迹缩略图预留数据。删除历史记录不会删除公共副本。
+
 字段、过滤原因和断电残行修复说明见 [GPS 轨迹留档说明](docs/gps-trace-debugging.md)。应用已关闭 Android 云备份和设备迁移备份，避免系统自动复制私密轨迹与 checkpoint。
 
 ## 摘要海报
@@ -104,11 +117,12 @@ adb pull /sdcard/Documents/RunVoice/gps-traces ./gps-traces
 ## 技术栈
 
 - Kotlin、Jetpack Compose、Coroutines / Flow
-- Android Foreground Service、MediaSession、TextToSpeech、AudioTrack
+- Android Foreground Service、TextToSpeech、AudioTrack
 - Google Play Services Location
 - Android BLE GATT 标准心率协议
 - Canvas / MediaStore 图片生成与保存
-- JUnit 4 JVM 单元测试
+- Room 本地数据库与版本化 schema
+- JUnit 4 JVM 单元测试、Android Room 仪器测试
 
 ## 项目结构
 
@@ -120,9 +134,15 @@ app/src/main/java/com/runvoice/
 │   ├── TrackingEngine.kt              # GPS 接受、距离、静止与配速决策
 │   ├── LapDetector.kt                 # 局部闭环与固定虚拟计时门
 │   ├── AnnouncementPolicy.kt          # 公里和阶段播报边界
+│   ├── VolumeKeyPolicy.kt             # 音量键触发、音量保护与去抖决策
 │   └── HeartRateAlertPolicy.kt        # 持续高心率告警策略
 ├── recovery/
 │   └── RunCheckpoint.kt               # checkpoint 编解码与原子存储
+├── history/
+│   ├── archive/                        # 海报、轨迹和历史记录的隔离归档
+│   ├── data/                           # Room、Repository 与私有文件清理
+│   ├── model/                          # 历史记录和月汇总数据模型
+│   └── ui/                             # 月列表、单次详情与 ViewModel
 ├── service/
 │   └── RunningService.kt              # 前台服务及模块编排
 ├── tracker/
@@ -135,6 +155,7 @@ app/src/main/java/com/runvoice/
 ├── voice/
 │   ├── VoiceAnnouncer.kt              # TTS 队列、预热与自恢复
 │   ├── VoiceStatsText.kt              # 配速和心率逐位读法
+│   ├── VolumeKeyWatcher.kt            # 监听音量变化并还原，供耳机音量键触发
 │   └── Metronome.kt                   # PCM 步频节拍器
 ├── share/                              # CSV 解析、轨迹几何与海报存储
 └── ui/                                 # 跑步、恢复、心率和关于页面
@@ -152,7 +173,10 @@ app/src/main/java/com/runvoice/
 | `FOREGROUND_SERVICE_LOCATION` | 息屏后继续定位 |
 | `BLUETOOTH_SCAN` / `BLUETOOTH_CONNECT` | BLE 心率，可选 |
 | `POST_NOTIFICATIONS` | Android 13+ 前台服务通知 |
+| 蓝牙绝对音量 | 耳机音量键播报所需，由耳机与系统协商，无对应权限 |
 | JDK | 17 |
+
+耳机音量键播报不需要无障碍权限、媒体键权限或修改系统设置的权限，只读取并写回媒体音量。
 
 ## 构建与验证
 
@@ -163,6 +187,14 @@ export JAVA_HOME=/path/to/jdk17
 export ANDROID_HOME=/path/to/android-sdk
 ./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease
 ```
+
+有已连接的 Android 设备或模拟器时，可额外运行 Room 与文件清理仪器测试：
+
+```bash
+./gradlew connectedDebugAndroidTest
+```
+
+Room schema 位于 `app/schemas/`，修改历史表结构时必须递增数据库版本、提供迁移并更新该目录。
 
 产物：
 
@@ -188,8 +220,12 @@ Gradle 生成的 Release APK 默认未签名。GitHub Releases 中的测试 APK 
 
 ## 已知边界与后续计划
 
-- 当前只保存 GPS CSV 和摘要海报，尚无单次跑步摘要数据库、历史列表或周/月汇总。
+- 第一版历史记录只提供按月浏览和基础汇总，尚无跨月趋势、筛选、搜索或训练分析。
+- 历史列表暂不生成轨迹缩略图；记录中已保留海报和轨迹引用，后续版本可在不改动实时运动链路的前提下补充。
 - 180 bpm 为固定安全提示阈值，不是个性化医学或训练建议。
+- 音量键播报依赖蓝牙绝对音量：耳机按键经 AVRCP 直接改系统音量，不产生 KeyEvent，因此应用只能观察音量变化再写回。若某副耳机不支持绝对音量，其音量键只调节耳机本地音量，应用收不到任何信号。
+- 音量键触发只在跑步进行中且屏幕熄灭时生效，且写回是事后动作，按下瞬间会有一次短暂的音量起伏。
+- 已移除媒体键播报：同时播放音乐或有声书时，该应用会持续占据系统的音频播放列表顶部并合法接管媒体键，此路径无法稳定用于播报。
 - 当前海报没有地图底图；后续若加入地图，优先评估离线数据方案，不直接依赖 OpenStreetMap 公共在线瓦片。
 - 真实设备上的定位质量、BLE 稳定性和后台限制仍受厂商系统、电源策略与硬件影响。
 

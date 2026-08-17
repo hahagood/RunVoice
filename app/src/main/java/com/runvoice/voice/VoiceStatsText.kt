@@ -9,7 +9,7 @@ internal object VoiceStatsText {
         val compactDigits = "$minutes${seconds.toString().padStart(2, '0')}"
         // Use the ideographic zero here. Unlike “零” in a continuous Chinese
         // numeral, “〇” explicitly represents a digit and keeps a trailing zero audible.
-        return digits(compactDigits, one = '一', zero = '〇')
+        return digits(compactDigits, one = '幺', zero = '〇')
     }
 
     fun heartRate(beatsPerMinute: Int): String {
